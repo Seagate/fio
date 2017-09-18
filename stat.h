@@ -226,7 +226,9 @@ struct thread_stat {
 
 	uint32_t priorityBit;
 	uint32_t io_u_plat_prio[DDIR_RWDIR_CNT][FIO_IO_U_PLAT_NR];
+	uint32_t io_u_plat_low_prio[DDIR_RWDIR_CNT][FIO_IO_U_PLAT_NR];
 	struct io_stat clat_prio_stat[DDIR_RWDIR_CNT];
+	struct io_stat clat_low_prio_stat[DDIR_RWDIR_CNT];
 
 	union {
 		uint64_t *ss_iops_data;
