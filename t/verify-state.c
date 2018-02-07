@@ -58,7 +58,8 @@ static void show(struct thread_io_list *s, size_t size)
 		show_s(s, no_s);
 		no_s++;
 		size -= __thread_io_list_sz(s->depth, s->nofiles);
-		s = (void *) s + __thread_io_list_sz(s->depth, s->nofiles);
+		s = (struct thread_io_list *)((char *) s +
+			__thread_io_list_sz(s->depth, s->nofiles));
 	} while (size != 0);
 }
 
@@ -118,10 +119,12 @@ static int show_file(const char *file)
 	if (ret < 0) {
 		log_err("read: %s\n", strerror(errno));
 		close(fd);
+		free(buf);
 		return 1;
 	} else if (ret != sb.st_size) {
 		log_err("Short read\n");
 		close(fd);
+		free(buf);
 		return 1;
 	}
 

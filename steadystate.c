@@ -6,18 +6,26 @@
 
 bool steadystate_enabled = false;
 
+void steadystate_free(struct thread_data *td)
+{
+	free(td->ss.iops_data);
+	free(td->ss.bw_data);
+	td->ss.iops_data = NULL;
+	td->ss.bw_data = NULL;
+}
+
 static void steadystate_alloc(struct thread_data *td)
 {
 	td->ss.bw_data = calloc(td->ss.dur, sizeof(uint64_t));
 	td->ss.iops_data = calloc(td->ss.dur, sizeof(uint64_t));
 
-	td->ss.state |= __FIO_SS_DATA;
+	td->ss.state |= FIO_SS_DATA;
 }
 
 void steadystate_setup(void)
 {
-	int i, prev_groupid;
 	struct thread_data *td, *prev_td;
+	int i, prev_groupid;
 
 	if (!steadystate_enabled)
 		return;
@@ -39,17 +47,15 @@ void steadystate_setup(void)
 		}
 
 		if (prev_groupid != td->groupid) {
-			if (prev_td != NULL) {
+			if (prev_td)
 				steadystate_alloc(prev_td);
-			}
 			prev_groupid = td->groupid;
 		}
 		prev_td = td;
 	}
 
-	if (prev_td != NULL && prev_td->o.group_reporting) {
+	if (prev_td && prev_td->o.group_reporting)
 		steadystate_alloc(prev_td);
-	}
 }
 
 static bool steadystate_slope(uint64_t iops, uint64_t bw,
@@ -63,33 +69,33 @@ static bool steadystate_slope(uint64_t iops, uint64_t bw,
 	ss->bw_data[ss->tail] = bw;
 	ss->iops_data[ss->tail] = iops;
 
-	if (ss->state & __FIO_SS_IOPS)
+	if (ss->state & FIO_SS_IOPS)
 		new_val = iops;
 	else
 		new_val = bw;
 
-	if (ss->state & __FIO_SS_BUFFER_FULL || ss->tail - ss->head == ss->dur - 1) {
-		if (!(ss->state & __FIO_SS_BUFFER_FULL)) {
+	if (ss->state & FIO_SS_BUFFER_FULL || ss->tail - ss->head == ss->dur - 1) {
+		if (!(ss->state & FIO_SS_BUFFER_FULL)) {
 			/* first time through */
 			for(i = 0, ss->sum_y = 0; i < ss->dur; i++) {
-				if (ss->state & __FIO_SS_IOPS)
+				if (ss->state & FIO_SS_IOPS)
 					ss->sum_y += ss->iops_data[i];
 				else
 					ss->sum_y += ss->bw_data[i];
 				j = (ss->head + i) % ss->dur;
-				if (ss->state & __FIO_SS_IOPS)
+				if (ss->state & FIO_SS_IOPS)
 					ss->sum_xy += i * ss->iops_data[j];
 				else
 					ss->sum_xy += i * ss->bw_data[j];
 			}
-			ss->state |= __FIO_SS_BUFFER_FULL;
+			ss->state |= FIO_SS_BUFFER_FULL;
 		} else {		/* easy to update the sums */
 			ss->sum_y -= ss->oldest_y;
 			ss->sum_y += new_val;
 			ss->sum_xy = ss->sum_xy - ss->sum_y + ss->dur * new_val;
 		}
 
-		if (ss->state & __FIO_SS_IOPS)
+		if (ss->state & FIO_SS_IOPS)
 			ss->oldest_y = ss->iops_data[ss->head];
 		else
 			ss->oldest_y = ss->bw_data[ss->head];
@@ -102,7 +108,7 @@ static bool steadystate_slope(uint64_t iops, uint64_t bw,
 		 */
 		ss->slope = (ss->sum_xy - (double) ss->sum_x * ss->sum_y / ss->dur) /
 				(ss->sum_x_sq - (double) ss->sum_x * ss->sum_x / ss->dur);
-		if (ss->state & __FIO_SS_PCT)
+		if (ss->state & FIO_SS_PCT)
 			ss->criterion = 100.0 * ss->slope / (ss->sum_y / ss->dur);
 		else
 			ss->criterion = ss->slope;
@@ -137,24 +143,24 @@ static bool steadystate_deviation(uint64_t iops, uint64_t bw,
 	ss->bw_data[ss->tail] = bw;
 	ss->iops_data[ss->tail] = iops;
 
-	if (ss->state & __FIO_SS_BUFFER_FULL || ss->tail - ss->head == ss->dur - 1) {
-		if (!(ss->state & __FIO_SS_BUFFER_FULL)) {
+	if (ss->state & FIO_SS_BUFFER_FULL || ss->tail - ss->head == ss->dur - 1) {
+		if (!(ss->state & FIO_SS_BUFFER_FULL)) {
 			/* first time through */
 			for(i = 0, ss->sum_y = 0; i < ss->dur; i++)
-				if (ss->state & __FIO_SS_IOPS)
+				if (ss->state & FIO_SS_IOPS)
 					ss->sum_y += ss->iops_data[i];
 				else
 					ss->sum_y += ss->bw_data[i];
-			ss->state |= __FIO_SS_BUFFER_FULL;
+			ss->state |= FIO_SS_BUFFER_FULL;
 		} else {		/* easy to update the sum */
 			ss->sum_y -= ss->oldest_y;
-			if (ss->state & __FIO_SS_IOPS)
+			if (ss->state & FIO_SS_IOPS)
 				ss->sum_y += ss->iops_data[ss->tail];
 			else
 				ss->sum_y += ss->bw_data[ss->tail];
 		}
 
-		if (ss->state & __FIO_SS_IOPS)
+		if (ss->state & FIO_SS_IOPS)
 			ss->oldest_y = ss->iops_data[ss->head];
 		else
 			ss->oldest_y = ss->bw_data[ss->head];
@@ -163,14 +169,14 @@ static bool steadystate_deviation(uint64_t iops, uint64_t bw,
 		ss->deviation = 0.0;
 
 		for (i = 0; i < ss->dur; i++) {
-			if (ss->state & __FIO_SS_IOPS)
+			if (ss->state & FIO_SS_IOPS)
 				diff = ss->iops_data[i] - mean;
 			else
 				diff = ss->bw_data[i] - mean;
 			ss->deviation = max(ss->deviation, diff * (diff < 0.0 ? -1.0 : 1.0));
 		}
 
-		if (ss->state & __FIO_SS_PCT)
+		if (ss->state & FIO_SS_PCT)
 			ss->criterion = 100.0 * ss->deviation / mean;
 		else
 			ss->criterion = ss->deviation;
@@ -196,7 +202,7 @@ void steadystate_check(void)
 	int i, j, ddir, prev_groupid, group_ramp_time_over = 0;
 	unsigned long rate_time;
 	struct thread_data *td, *td2;
-	struct timeval now;
+	struct timespec now;
 	uint64_t group_bw = 0, group_iops = 0;
 	uint64_t td_iops, td_bytes;
 	bool ret;
@@ -207,7 +213,7 @@ void steadystate_check(void)
 
 		if (!ss->dur || td->runstate <= TD_SETTING_UP ||
 		    td->runstate >= TD_EXITED || !ss->state ||
-		    ss->state & __FIO_SS_ATTAINED)
+		    ss->state & FIO_SS_ATTAINED)
 			continue;
 
 		td_iops = 0;
@@ -221,13 +227,13 @@ void steadystate_check(void)
 		prev_groupid = td->groupid;
 
 		fio_gettime(&now, NULL);
-		if (ss->ramp_time && !(ss->state & __FIO_SS_RAMP_OVER)) {
+		if (ss->ramp_time && !(ss->state & FIO_SS_RAMP_OVER)) {
 			/*
 			 * Begin recording data one second after ss->ramp_time
 			 * has elapsed
 			 */
 			if (utime_since(&td->epoch, &now) >= (ss->ramp_time + 1000000L))
-				ss->state |= __FIO_SS_RAMP_OVER;
+				ss->state |= FIO_SS_RAMP_OVER;
 		}
 
 		td_io_u_lock(td);
@@ -247,7 +253,7 @@ void steadystate_check(void)
 		 * prev_iops/bw the first time through after ss->ramp_time
 		 * is done.
 		 */
-		if (ss->state & __FIO_SS_RAMP_OVER) {
+		if (ss->state & FIO_SS_RAMP_OVER) {
 			group_bw += 1000 * (td_bytes - ss->prev_bytes) / rate_time;
 			group_iops += 1000 * (td_iops - ss->prev_iops) / rate_time;
 			++group_ramp_time_over;
@@ -255,7 +261,7 @@ void steadystate_check(void)
 		ss->prev_iops = td_iops;
 		ss->prev_bytes = td_bytes;
 
-		if (td->o.group_reporting && !(ss->state & __FIO_SS_DATA))
+		if (td->o.group_reporting && !(ss->state & FIO_SS_DATA))
 			continue;
 
 		/*
@@ -273,7 +279,7 @@ void steadystate_check(void)
 					(unsigned long long) group_bw,
 					ss->head, ss->tail);
 
-		if (ss->state & __FIO_SS_SLOPE)
+		if (ss->state & FIO_SS_SLOPE)
 			ret = steadystate_slope(group_iops, group_bw, td);
 		else
 			ret = steadystate_deviation(group_iops, group_bw, td);
@@ -282,12 +288,12 @@ void steadystate_check(void)
 			if (td->o.group_reporting) {
 				for_each_td(td2, j) {
 					if (td2->groupid == td->groupid) {
-						td2->ss.state |= __FIO_SS_ATTAINED;
+						td2->ss.state |= FIO_SS_ATTAINED;
 						fio_mark_td_terminate(td2);
 					}
 				}
 			} else {
-				ss->state |= __FIO_SS_ATTAINED;
+				ss->state |= FIO_SS_ATTAINED;
 				fio_mark_td_terminate(td);
 			}
 		}
@@ -314,7 +320,7 @@ int td_steadystate_init(struct thread_data *td)
 
 		ss->state = o->ss_state;
 		if (!td->ss.ramp_time)
-			ss->state |= __FIO_SS_RAMP_OVER;
+			ss->state |= FIO_SS_RAMP_OVER;
 
 		ss->sum_x = o->ss_dur * (o->ss_dur - 1) / 2;
 		ss->sum_x_sq = (o->ss_dur - 1) * (o->ss_dur) * (2*o->ss_dur - 1) / 6;

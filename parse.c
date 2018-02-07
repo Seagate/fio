@@ -12,6 +12,7 @@
 #include <math.h>
 #include <float.h>
 
+#include "compiler/compiler.h"
 #include "parse.h"
 #include "debug.h"
 #include "options.h"
@@ -23,6 +24,22 @@
 #ifdef CONFIG_ARITHMETIC
 #include "y.tab.h"
 #endif
+
+static const char *opt_type_names[] = {
+	"OPT_INVALID",
+	"OPT_STR",
+	"OPT_STR_MULTI",
+	"OPT_STR_VAL",
+	"OPT_STR_VAL_TIME",
+	"OPT_STR_STORE",
+	"OPT_RANGE",
+	"OPT_INT",
+	"OPT_BOOL",
+	"OPT_FLOAT_LIST",
+	"OPT_STR_SET",
+	"OPT_DEPRECATED",
+	"OPT_UNSUPPORTED",
+};
 
 static struct fio_option *__fio_options;
 
@@ -469,6 +486,17 @@ static int str_match_len(const struct value_pair *vp, const char *str)
 			*ptr = (val);			\
 	} while (0)
 
+static const char *opt_type_name(struct fio_option *o)
+{
+	compiletime_assert(ARRAY_SIZE(opt_type_names) - 1 == FIO_OPT_UNSUPPORTED,
+				"opt_type_names[] index");
+
+	if (o->type <= FIO_OPT_UNSUPPORTED)
+		return opt_type_names[o->type];
+
+	return "OPT_UNKNOWN?";
+}
+
 static int __handle_option(struct fio_option *o, const char *ptr, void *data,
 			   int first, int more, int curr)
 {
@@ -483,8 +511,8 @@ static int __handle_option(struct fio_option *o, const char *ptr, void *data,
 	struct value_pair posval[PARSE_MAX_VP];
 	int i, all_skipped = 1;
 
-	dprint(FD_PARSE, "__handle_option=%s, type=%d, ptr=%s\n", o->name,
-							o->type, ptr);
+	dprint(FD_PARSE, "__handle_option=%s, type=%s, ptr=%s\n", o->name,
+							opt_type_name(o), ptr);
 
 	if (!ptr && o->type != FIO_OPT_STR_SET && o->type != FIO_OPT_STR) {
 		log_err("Option %s requires an argument\n", o->name);
@@ -556,8 +584,8 @@ static int __handle_option(struct fio_option *o, const char *ptr, void *data,
 			return 1;
 		}
 		if (o->minval && ull < o->minval) {
-			log_err("min value out of range: %llu"
-					" (%u min)\n", ull, o->minval);
+			log_err("min value out of range: %lld"
+					" (%d min)\n", ull, o->minval);
 			return 1;
 		}
 		if (o->posval[0].ival) {
@@ -1345,7 +1373,7 @@ void options_free(struct fio_option *options, void *data)
 	dprint(FD_PARSE, "free options\n");
 
 	for (o = &options[0]; o->name; o++) {
-		if (o->type != FIO_OPT_STR_STORE || !o->off1)
+		if (o->type != FIO_OPT_STR_STORE || !o->off1 || o->no_free)
 			continue;
 
 		ptr = td_var(data, o, o->off1);

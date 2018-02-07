@@ -59,6 +59,8 @@ enum fio_ioengine_flags {
 	FIO_MEMALIGN	= 1 << 9,	/* engine wants aligned memory */
 	FIO_BIT_BASED	= 1 << 10,	/* engine uses a bit base (e.g. uses Kbit as opposed to KB) */
 	FIO_FAKEIO	= 1 << 11,	/* engine pretends to do IO */
+	FIO_NOSTATS	= 1 << 12,	/* don't do IO stats */
+	FIO_NOFILEHASH	= 1 << 13,	/* doesn't hash the files for lookup later. */
 };
 
 /*
@@ -79,7 +81,7 @@ extern int td_io_close_file(struct thread_data *, struct fio_file *);
 extern int td_io_unlink_file(struct thread_data *, struct fio_file *);
 extern int __must_check td_io_get_file_size(struct thread_data *, struct fio_file *);
 
-extern struct ioengine_ops *load_ioengine(struct thread_data *, const char *);
+extern struct ioengine_ops *load_ioengine(struct thread_data *);
 extern void register_ioengine(struct ioengine_ops *);
 extern void unregister_ioengine(struct ioengine_ops *);
 extern void free_ioengine(struct thread_data *);

@@ -157,7 +157,7 @@ static int fio_devdax_prep(struct thread_data *td, struct io_u *io_u)
 	 * It fits within existing mapping, use it
 	 */
 	if (io_u->offset >= fdd->devdax_off &&
-	    io_u->offset + io_u->buflen < fdd->devdax_off + fdd->devdax_sz)
+	    io_u->offset + io_u->buflen <= fdd->devdax_off + fdd->devdax_sz)
 		goto done;
 
 	/*
@@ -307,6 +307,7 @@ fio_devdax_get_file_size(struct thread_data *td, struct fio_file *f)
 	if (rc < 0) {
 		log_err("%s: fscanf on %s failed (%s)\n",
 			td->o.name, spath, strerror(errno));
+		fclose(sfile);
 		return 1;
 	}
 

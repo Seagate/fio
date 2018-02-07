@@ -232,7 +232,7 @@ static int fio_libaio_queue(struct thread_data *td, struct io_u *io_u)
 static void fio_libaio_queued(struct thread_data *td, struct io_u **io_us,
 			      unsigned int nr)
 {
-	struct timeval now;
+	struct timespec now;
 	unsigned int i;
 
 	if (!fio_fill_issue_time(td))
@@ -255,7 +255,7 @@ static int fio_libaio_commit(struct thread_data *td)
 	struct io_u **io_us;
     struct thread_options *o = &td->o;
 	struct libaio_options *eo = td->eo;
-	struct timeval tv;
+	struct timespec ts;
 	int ret, wait_start = 0;
 
 	if (!ld->queued)
@@ -327,9 +327,9 @@ static int fio_libaio_commit(struct thread_data *td)
 				break;
 			}
 			if (!wait_start) {
-				fio_gettime(&tv, NULL);
+				fio_gettime(&ts, NULL);
 				wait_start = 1;
-			} else if (mtime_since_now(&tv) > 30000) {
+			} else if (mtime_since_now(&ts) > 30000) {
 				log_err("fio: aio appears to be stalled, giving up\n");
 				break;
 			}

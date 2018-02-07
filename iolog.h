@@ -118,7 +118,7 @@ struct io_log {
 	 */
 	struct io_stat avg_window[DDIR_RWDIR_CNT];
 	unsigned long avg_msec;
-	unsigned long avg_last;
+	unsigned long avg_last[DDIR_RWDIR_CNT];
 
 	/*
 	 * Windowed latency histograms, for keeping track of when we need to
@@ -132,6 +132,11 @@ struct io_log {
 	pthread_mutex_t chunk_lock;
 	unsigned int chunk_seq;
 	struct flist_head chunk_list;
+
+	pthread_mutex_t deferred_free_lock;
+#define IOLOG_MAX_DEFER	8
+	void *deferred_items[IOLOG_MAX_DEFER];
+	unsigned int deferred;
 };
 
 /*
@@ -260,7 +265,7 @@ struct log_params {
 
 static inline bool per_unit_log(struct io_log *log)
 {
-	return log && !log->avg_msec;
+	return log && (!log->avg_msec || log->log_gz || log->log_gz_store);
 }
 
 static inline bool inline_log(struct io_log *log)

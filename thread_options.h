@@ -26,7 +26,7 @@ enum fio_memtype {
 #define ERROR_STR_MAX	128
 
 #define BSSPLIT_MAX	64
-#define ZONESPLIT_MAX	64
+#define ZONESPLIT_MAX	256
 
 struct bssplit {
 	uint32_t bs;
@@ -36,6 +36,8 @@ struct bssplit {
 struct zone_split {
 	uint8_t access_perc;
 	uint8_t size_perc;
+	uint8_t pad[6];
+	uint64_t size;
 };
 
 #define NR_OPTS_SZ	(FIO_MAX_OPTS / (8 * sizeof(uint64_t)))
@@ -53,6 +55,7 @@ struct thread_options {
 	char *filename_format;
 	char *opendir;
 	char *ioengine;
+	char *ioengine_so_path;
 	char *mmapfile;
 	enum td_ddir td_ddir;
 	unsigned int rw_seq;
@@ -65,6 +68,7 @@ struct thread_options {
 	unsigned int iodepth_batch;
 	unsigned int iodepth_batch_complete_min;
 	unsigned int iodepth_batch_complete_max;
+	unsigned int serialize_overlap;
 
 	unsigned int unique_filename;
 
@@ -76,6 +80,7 @@ struct thread_options {
 	unsigned long long file_size_low;
 	unsigned long long file_size_high;
 	unsigned long long start_offset;
+	unsigned long long start_offset_align;
 
 	unsigned int bs[DDIR_RWDIR_CNT];
 	unsigned int ba[DDIR_RWDIR_CNT];
@@ -102,6 +107,7 @@ struct thread_options {
 	unsigned int end_fsync;
 	unsigned int pre_read;
 	unsigned int sync_io;
+	unsigned int write_hint;
 	unsigned int verify;
 	unsigned int do_verify;
 	unsigned int verifysort;
@@ -186,7 +192,7 @@ struct thread_options {
 	enum fio_memtype mem_type;
 	unsigned int mem_align;
 
-	unsigned int max_latency;
+	unsigned long long max_latency;
 
 	unsigned int stonewall;
 	unsigned int new_group;
@@ -200,6 +206,7 @@ struct thread_options {
 	unsigned int numa_mem_prefer_node;
 	char *numa_memnodes;
 	unsigned int gpu_dev_id;
+	unsigned int start_offset_percent;
 
 	unsigned int iolog;
 	unsigned int rwmixcycle;
@@ -211,7 +218,6 @@ struct thread_options {
 	unsigned int group_reporting;
 	unsigned int stats;
 	unsigned int fadvise_hint;
-	unsigned int fadvise_stream;
 	enum fio_fallocate_mode fallocate_mode;
 	unsigned int zero_buffers;
 	unsigned int refill_buffers;
@@ -236,6 +242,7 @@ struct thread_options {
 	unsigned int trim_zero;
 	unsigned long long trim_backlog;
 	unsigned int clat_percentiles;
+	unsigned int lat_percentiles;
 	unsigned int percentile_precision;	/* digits after decimal for percentiles */
 	fio_fp64_t percentile_list[FIO_IO_U_LIST_MAX_LEN];
 
@@ -266,6 +273,7 @@ struct thread_options {
 	unsigned int rate_iops[DDIR_RWDIR_CNT];
 	unsigned int rate_iops_min[DDIR_RWDIR_CNT];
 	unsigned int rate_process;
+	unsigned int rate_ign_think;
 
 	char *ioscheduler;
 
@@ -303,8 +311,9 @@ struct thread_options {
 	unsigned long long latency_window;
 	fio_fp64_t latency_percentile;
 
+	unsigned int sig_figs;
+
 	unsigned block_error_hist;
-	unsigned int skip_bad;
 
 	unsigned int replay_align;
 	unsigned int replay_scale;
@@ -339,6 +348,8 @@ struct thread_options_pack {
 	uint32_t iodepth_batch;
 	uint32_t iodepth_batch_complete_min;
 	uint32_t iodepth_batch_complete_max;
+	uint32_t serialize_overlap;
+	uint32_t lat_percentiles;
 
 	uint64_t size;
 	uint64_t io_size;
@@ -349,6 +360,7 @@ struct thread_options_pack {
 	uint64_t file_size_low;
 	uint64_t file_size_high;
 	uint64_t start_offset;
+	uint64_t start_offset_align;
 
 	uint32_t bs[DDIR_RWDIR_CNT];
 	uint32_t ba[DDIR_RWDIR_CNT];
@@ -375,6 +387,7 @@ struct thread_options_pack {
 	uint32_t end_fsync;
 	uint32_t pre_read;
 	uint32_t sync_io;
+	uint32_t write_hint;
 	uint32_t verify;
 	uint32_t do_verify;
 	uint32_t verifysort;
@@ -417,6 +430,8 @@ struct thread_options_pack {
 	uint32_t random_distribution;
 	uint32_t exitall_error;
 
+	uint32_t sync_file_range;
+
 	struct zone_split zone_split[DDIR_RWDIR_CNT][ZONESPLIT_MAX];
 	uint32_t zone_split_nr[DDIR_RWDIR_CNT];
 
@@ -455,8 +470,6 @@ struct thread_options_pack {
 	uint32_t mem_type;
 	uint32_t mem_align;
 
-	uint32_t max_latency;
-
 	uint32_t stonewall;
 	uint32_t new_group;
 	uint32_t numjobs;
@@ -469,7 +482,7 @@ struct thread_options_pack {
 	uint8_t log_gz_cpumask[FIO_TOP_STR_MAX];
 #endif
 	uint32_t gpu_dev_id;
-	uint32_t pad;
+	uint32_t start_offset_percent;
 	uint32_t cpus_allowed_policy;
 	uint32_t iolog;
 	uint32_t rwmixcycle;
@@ -481,7 +494,6 @@ struct thread_options_pack {
 	uint32_t group_reporting;
 	uint32_t stats;
 	uint32_t fadvise_hint;
-	uint32_t fadvise_stream;
 	uint32_t fallocate_mode;
 	uint32_t zero_buffers;
 	uint32_t refill_buffers;
@@ -536,6 +548,8 @@ struct thread_options_pack {
 	uint32_t rate_iops[DDIR_RWDIR_CNT];
 	uint32_t rate_iops_min[DDIR_RWDIR_CNT];
 	uint32_t rate_process;
+	uint32_t rate_ign_think;
+	uint32_t pad;
 
 	uint8_t ioscheduler[FIO_TOP_STR_MAX];
 
@@ -567,15 +581,14 @@ struct thread_options_pack {
 	uint64_t offset_increment;
 	uint64_t number_ios;
 
-	uint32_t sync_file_range;
-	uint32_t pad2;
-
 	uint64_t latency_target;
 	uint64_t latency_window;
+	uint64_t max_latency;
 	fio_fp64_t latency_percentile;
 
+	uint32_t sig_figs;
+
 	uint32_t block_error_hist;
-	uint32_t skip_bad;
 
 	uint32_t replay_align;
 	uint32_t replay_scale;

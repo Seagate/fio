@@ -30,9 +30,6 @@
 static void populate_hdr(struct thread_data *td, struct io_u *io_u,
 			 struct verify_header *hdr, unsigned int header_num,
 			 unsigned int header_len);
-static void fill_hdr(struct thread_data *td, struct io_u *io_u,
-		     struct verify_header *hdr, unsigned int header_num,
-		     unsigned int header_len, uint64_t rand_seed);
 static void __fill_hdr(struct thread_data *td, struct io_u *io_u,
 		       struct verify_header *hdr, unsigned int header_num,
 		       unsigned int header_len, uint64_t rand_seed);
@@ -90,8 +87,13 @@ static unsigned int get_hdr_inc(struct thread_data *td, struct io_u *io_u)
 {
 	unsigned int hdr_inc;
 
+	/*
+	 * If we use bs_unaligned, buflen can be larger than the verify
+	 * interval (which just defaults to the smallest blocksize possible).
+	 */
 	hdr_inc = io_u->buflen;
-	if (td->o.verify_interval && td->o.verify_interval <= io_u->buflen)
+	if (td->o.verify_interval && td->o.verify_interval <= io_u->buflen &&
+	    !td->o.bs_unaligned)
 		hdr_inc = td->o.verify_interval;
 
 	return hdr_inc;
@@ -252,7 +254,7 @@ static void dump_buf(char *buf, unsigned int len, unsigned long long offset,
 
 	memset(fname, 0, sizeof(fname));
 	if (aux_path)
-		sprintf(fname, "%s%s", aux_path, FIO_OS_PATH_SEPARATOR);
+		sprintf(fname, "%s%c", aux_path, FIO_OS_PATH_SEPARATOR);
 
 	strncpy(fname + strlen(fname), basename(ptr), buf_left - 1);
 
@@ -271,6 +273,7 @@ static void dump_buf(char *buf, unsigned int len, unsigned long long offset,
 	fd = open(fname, O_CREAT | O_TRUNC | O_WRONLY, 0644);
 	if (fd < 0) {
 		perror("open verify buf file");
+		free(ptr);
 		return;
 	}
 
@@ -387,7 +390,7 @@ static int verify_io_u_pattern(struct verify_header *hdr, struct vcont *vc)
 	(void)paste_format_inplace(pattern, pattern_size,
 				   td->o.verify_fmt, td->o.verify_fmt_sz, io_u);
 
-	buf = (void *) hdr + header_size;
+	buf = (char *) hdr + header_size;
 	len = get_hdr_inc(td, io_u) - header_size;
 	mod = (get_hdr_inc(td, io_u) * vc->hdr_num + header_size) % pattern_size;
 
@@ -1166,7 +1169,7 @@ static void __fill_hdr(struct thread_data *td, struct io_u *io_u,
 	hdr->rand_seed = rand_seed;
 	hdr->offset = io_u->offset + header_num * td->o.verify_interval;
 	hdr->time_sec = io_u->start_time.tv_sec;
-	hdr->time_usec = io_u->start_time.tv_usec;
+	hdr->time_nsec = io_u->start_time.tv_nsec;
 	hdr->thread = td->thread_number;
 	hdr->numberio = io_u->numberio;
 	hdr->crc32 = fio_crc32c(p, offsetof(struct verify_header, crc32));
@@ -1177,7 +1180,6 @@ static void fill_hdr(struct thread_data *td, struct io_u *io_u,
 		     struct verify_header *hdr, unsigned int header_num,
 		     unsigned int header_len, uint64_t rand_seed)
 {
-
 	if (td->o.verify != VERIFY_PATTERN_NO_HDR)
 		__fill_hdr(td, io_u, hdr, header_num, header_len, rand_seed);
 }
@@ -1187,9 +1189,10 @@ static void populate_hdr(struct thread_data *td, struct io_u *io_u,
 			 unsigned int header_len)
 {
 	unsigned int data_len;
-	void *data, *p;
+	void *data;
+	char *p;
 
-	p = (void *) hdr;
+	p = (char *) hdr;
 
 	fill_hdr(td, io_u, hdr, header_num, header_len, io_u->rand_seed);
 
@@ -1724,7 +1727,7 @@ void verify_save_state(int mask)
 		char prefix[PATH_MAX];
 
 		if (aux_path)
-			sprintf(prefix, "%s%slocal", aux_path, FIO_OS_PATH_SEPARATOR);
+			sprintf(prefix, "%s%clocal", aux_path, FIO_OS_PATH_SEPARATOR);
 		else
 			strcpy(prefix, "local");
 

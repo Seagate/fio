@@ -56,14 +56,16 @@ static int bs_cmp(const void *p1, const void *p2)
 
 struct split {
 	unsigned int nr;
-	unsigned int val1[100];
-	unsigned int val2[100];
+	unsigned int val1[ZONESPLIT_MAX];
+	unsigned long long val2[ZONESPLIT_MAX];
 };
 
 static int split_parse_ddir(struct thread_options *o, struct split *split,
-			    enum fio_ddir ddir, char *str)
+			    enum fio_ddir ddir, char *str, bool absolute,
+			    unsigned int max_splits)
 {
-	unsigned int i, perc;
+	unsigned long long perc;
+	unsigned int i;
 	long long val;
 	char *fname;
 
@@ -80,31 +82,46 @@ static int split_parse_ddir(struct thread_options *o, struct split *split,
 		if (perc_str) {
 			*perc_str = '\0';
 			perc_str++;
-			perc = atoi(perc_str);
-			if (perc > 100)
-				perc = 100;
-			else if (!perc)
+			if (absolute) {
+				if (str_to_decimal(perc_str, &val, 1, o, 0, 0)) {
+					log_err("fio: split conversion failed\n");
+					return 1;
+				}
+				perc = val;
+			} else {
+				perc = atoi(perc_str);
+				if (perc > 100)
+					perc = 100;
+				else if (!perc)
+					perc = -1U;
+			}
+		} else {
+			if (absolute)
+				perc = 0;
+			else
 				perc = -1U;
-		} else
-			perc = -1U;
+		}
 
 		if (str_to_decimal(fname, &val, 1, o, 0, 0)) {
-			log_err("fio: bssplit conversion failed\n");
+			log_err("fio: split conversion failed\n");
 			return 1;
 		}
 
 		split->val1[i] = val;
 		split->val2[i] = perc;
 		i++;
-		if (i == 100)
+		if (i == max_splits) {
+			log_err("fio: hit max of %d split entries\n", i);
 			break;
+		}
 	}
 
 	split->nr = i;
 	return 0;
 }
 
-static int bssplit_ddir(struct thread_options *o, enum fio_ddir ddir, char *str)
+static int bssplit_ddir(struct thread_options *o, enum fio_ddir ddir, char *str,
+			bool data)
 {
 	unsigned int i, perc, perc_missing;
 	unsigned int max_bs, min_bs;
@@ -112,7 +129,7 @@ static int bssplit_ddir(struct thread_options *o, enum fio_ddir ddir, char *str)
 
 	memset(&split, 0, sizeof(split));
 
-	if (split_parse_ddir(o, &split, ddir, str))
+	if (split_parse_ddir(o, &split, ddir, str, data, BSSPLIT_MAX))
 		return 1;
 	if (!split.nr)
 		return 0;
@@ -176,9 +193,10 @@ static int bssplit_ddir(struct thread_options *o, enum fio_ddir ddir, char *str)
 	return 0;
 }
 
-typedef int (split_parse_fn)(struct thread_options *, enum fio_ddir, char *);
+typedef int (split_parse_fn)(struct thread_options *, enum fio_ddir, char *, bool);
 
-static int str_split_parse(struct thread_data *td, char *str, split_parse_fn *fn)
+static int str_split_parse(struct thread_data *td, char *str,
+			   split_parse_fn *fn, bool data)
 {
 	char *odir, *ddir;
 	int ret = 0;
@@ -187,37 +205,37 @@ static int str_split_parse(struct thread_data *td, char *str, split_parse_fn *fn
 	if (odir) {
 		ddir = strchr(odir + 1, ',');
 		if (ddir) {
-			ret = fn(&td->o, DDIR_TRIM, ddir + 1);
+			ret = fn(&td->o, DDIR_TRIM, ddir + 1, data);
 			if (!ret)
 				*ddir = '\0';
 		} else {
 			char *op;
 
 			op = strdup(odir + 1);
-			ret = fn(&td->o, DDIR_TRIM, op);
+			ret = fn(&td->o, DDIR_TRIM, op, data);
 
 			free(op);
 		}
 		if (!ret)
-			ret = fn(&td->o, DDIR_WRITE, odir + 1);
+			ret = fn(&td->o, DDIR_WRITE, odir + 1, data);
 		if (!ret) {
 			*odir = '\0';
-			ret = fn(&td->o, DDIR_READ, str);
+			ret = fn(&td->o, DDIR_READ, str, data);
 		}
 	} else {
 		char *op;
 
 		op = strdup(str);
-		ret = fn(&td->o, DDIR_WRITE, op);
+		ret = fn(&td->o, DDIR_WRITE, op, data);
 		free(op);
 
 		if (!ret) {
 			op = strdup(str);
-			ret = fn(&td->o, DDIR_TRIM, op);
+			ret = fn(&td->o, DDIR_TRIM, op, data);
 			free(op);
 		}
 		if (!ret)
-			ret = fn(&td->o, DDIR_READ, str);
+			ret = fn(&td->o, DDIR_READ, str, data);
 	}
 
 	return ret;
@@ -234,7 +252,7 @@ static int str_bssplit_cb(void *data, const char *input)
 	strip_blank_front(&str);
 	strip_blank_end(str);
 
-	ret = str_split_parse(td, str, bssplit_ddir);
+	ret = str_split_parse(td, str, bssplit_ddir, false);
 
 	if (parse_dryrun()) {
 		int i;
@@ -270,7 +288,8 @@ static int str2error(char *str)
 	return 0;
 }
 
-static int ignore_error_type(struct thread_data *td, int etype, char *str)
+static int ignore_error_type(struct thread_data *td, enum error_type_bit etype,
+				char *str)
 {
 	unsigned int i;
 	int *error;
@@ -282,7 +301,7 @@ static int ignore_error_type(struct thread_data *td, int etype, char *str)
 	}
 
 	td->o.ignore_error_nr[etype] = 4;
-	error = malloc(4 * sizeof(struct bssplit));
+	error = calloc(4, sizeof(int));
 
 	i = 0;
 	while ((fname = strsep(&str, ":")) != NULL) {
@@ -306,8 +325,9 @@ static int ignore_error_type(struct thread_data *td, int etype, char *str)
 				error[i] = -error[i];
 		}
 		if (!error[i]) {
-			log_err("Unknown error %s, please use number value \n",
+			log_err("Unknown error %s, please use number value\n",
 				  fname);
+			td->o.ignore_error_nr[etype] = 0;
 			free(error);
 			return 1;
 		}
@@ -317,8 +337,10 @@ static int ignore_error_type(struct thread_data *td, int etype, char *str)
 		td->o.continue_on_error |= 1 << etype;
 		td->o.ignore_error_nr[etype] = i;
 		td->o.ignore_error[etype] = error;
-	} else
+	} else {
+		td->o.ignore_error_nr[etype] = 0;
 		free(error);
+	}
 
 	return 0;
 
@@ -328,7 +350,8 @@ static int str_ignore_error_cb(void *data, const char *input)
 {
 	struct thread_data *td = cb_data_to_td(data);
 	char *str, *p, *n;
-	int type = 0, ret = 1;
+	int ret = 1;
+	enum error_type_bit type = 0;
 
 	if (parse_dryrun())
 		return 0;
@@ -818,23 +841,15 @@ static int str_sfr_cb(void *data, const char *str)
 }
 #endif
 
-static int zone_cmp(const void *p1, const void *p2)
-{
-	const struct zone_split *zsp1 = p1;
-	const struct zone_split *zsp2 = p2;
-
-	return (int) zsp2->access_perc - (int) zsp1->access_perc;
-}
-
 static int zone_split_ddir(struct thread_options *o, enum fio_ddir ddir,
-			   char *str)
+			   char *str, bool absolute)
 {
 	unsigned int i, perc, perc_missing, sperc, sperc_missing;
 	struct split split;
 
 	memset(&split, 0, sizeof(split));
 
-	if (split_parse_ddir(o, &split, ddir, str))
+	if (split_parse_ddir(o, &split, ddir, str, absolute, ZONESPLIT_MAX))
 		return 1;
 	if (!split.nr)
 		return 0;
@@ -843,7 +858,10 @@ static int zone_split_ddir(struct thread_options *o, enum fio_ddir ddir,
 	o->zone_split_nr[ddir] = split.nr;
 	for (i = 0; i < split.nr; i++) {
 		o->zone_split[ddir][i].access_perc = split.val1[i];
-		o->zone_split[ddir][i].size_perc = split.val2[i];
+		if (absolute)
+			o->zone_split[ddir][i].size = split.val2[i];
+		else
+			o->zone_split[ddir][i].size_perc = split.val2[i];
 	}
 
 	/*
@@ -859,11 +877,12 @@ static int zone_split_ddir(struct thread_options *o, enum fio_ddir ddir,
 		else
 			perc += zsp->access_perc;
 
-		if (zsp->size_perc == (uint8_t) -1U)
-			sperc_missing++;
-		else
-			sperc += zsp->size_perc;
-
+		if (!absolute) {
+			if (zsp->size_perc == (uint8_t) -1U)
+				sperc_missing++;
+			else
+				sperc += zsp->size_perc;
+		}
 	}
 
 	if (perc > 100 || sperc > 100) {
@@ -905,20 +924,17 @@ static int zone_split_ddir(struct thread_options *o, enum fio_ddir ddir,
 		}
 	}
 
-	/*
-	 * now sort based on percentages, for ease of lookup
-	 */
-	qsort(o->zone_split[ddir], o->zone_split_nr[ddir], sizeof(struct zone_split), zone_cmp);
 	return 0;
 }
 
 static void __td_zone_gen_index(struct thread_data *td, enum fio_ddir ddir)
 {
 	unsigned int i, j, sprev, aprev;
+	uint64_t sprev_sz;
 
 	td->zone_state_index[ddir] = malloc(sizeof(struct zone_split_index) * 100);
 
-	sprev = aprev = 0;
+	sprev_sz = sprev = aprev = 0;
 	for (i = 0; i < td->o.zone_split_nr[ddir]; i++) {
 		struct zone_split *zsp = &td->o.zone_split[ddir][i];
 
@@ -927,10 +943,14 @@ static void __td_zone_gen_index(struct thread_data *td, enum fio_ddir ddir)
 
 			zsi->size_perc = sprev + zsp->size_perc;
 			zsi->size_perc_prev = sprev;
+
+			zsi->size = sprev_sz + zsp->size;
+			zsi->size_prev = sprev_sz;
 		}
 
 		aprev += zsp->access_perc;
 		sprev += zsp->size_perc;
+		sprev_sz += zsp->size;
 	}
 }
 
@@ -949,8 +969,10 @@ static void td_zone_gen_index(struct thread_data *td)
 		__td_zone_gen_index(td, i);
 }
 
-static int parse_zoned_distribution(struct thread_data *td, const char *input)
+static int parse_zoned_distribution(struct thread_data *td, const char *input,
+				    bool absolute)
 {
+	const char *pre = absolute ? "zoned_abs:" : "zoned:";
 	char *str, *p;
 	int i, ret = 0;
 
@@ -960,14 +982,14 @@ static int parse_zoned_distribution(struct thread_data *td, const char *input)
 	strip_blank_end(str);
 
 	/* We expect it to start like that, bail if not */
-	if (strncmp(str, "zoned:", 6)) {
+	if (strncmp(str, pre, strlen(pre))) {
 		log_err("fio: mismatch in zoned input <%s>\n", str);
 		free(p);
 		return 1;
 	}
-	str += strlen("zoned:");
+	str += strlen(pre);
 
-	ret = str_split_parse(td, str, zone_split_ddir);
+	ret = str_split_parse(td, str, zone_split_ddir, absolute);
 
 	free(p);
 
@@ -979,8 +1001,15 @@ static int parse_zoned_distribution(struct thread_data *td, const char *input)
 		for (j = 0; j < td->o.zone_split_nr[i]; j++) {
 			struct zone_split *zsp = &td->o.zone_split[i][j];
 
-			dprint(FD_PARSE, "\t%d: %u/%u\n", j, zsp->access_perc,
-								zsp->size_perc);
+			if (absolute) {
+				dprint(FD_PARSE, "\t%d: %u/%llu\n", j,
+						zsp->access_perc,
+						(unsigned long long) zsp->size);
+			} else {
+				dprint(FD_PARSE, "\t%d: %u/%u\n", j,
+						zsp->access_perc,
+						zsp->size_perc);
+			}
 		}
 	}
 
@@ -1019,7 +1048,9 @@ static int str_random_distribution_cb(void *data, const char *str)
 	else if (td->o.random_distribution == FIO_RAND_DIST_GAUSS)
 		val = 0.0;
 	else if (td->o.random_distribution == FIO_RAND_DIST_ZONED)
-		return parse_zoned_distribution(td, str);
+		return parse_zoned_distribution(td, str, false);
+	else if (td->o.random_distribution == FIO_RAND_DIST_ZONED_ABS)
+		return parse_zoned_distribution(td, str, true);
 	else
 		return 0;
 
@@ -1099,9 +1130,9 @@ static int str_steadystate_cb(void *data, const char *str)
 		if (parse_dryrun())
 			return 0;
 
-		td->o.ss_state |= __FIO_SS_PCT;
+		td->o.ss_state |= FIO_SS_PCT;
 		td->o.ss_limit.u.f = val;
-	} else if (td->o.ss_state & __FIO_SS_IOPS) {
+	} else if (td->o.ss_state & FIO_SS_IOPS) {
 		if (!str_to_float(nr, &val, 0)) {
 			log_err("fio: steadystate IOPS threshold postfix parsing failed\n");
 			free(nr);
@@ -1376,7 +1407,23 @@ static int str_gtod_reduce_cb(void *data, int *il)
 	td->o.disable_bw = !!val;
 	td->o.clat_percentiles = !val;
 	if (val)
-		td->tv_cache_mask = 63;
+		td->ts_cache_mask = 63;
+
+	return 0;
+}
+
+static int str_offset_cb(void *data, unsigned long long *__val)
+{
+	struct thread_data *td = cb_data_to_td(data);
+	unsigned long long v = *__val;
+
+	if (parse_is_percent(v)) {
+		td->o.start_offset = 0;
+		td->o.start_offset_percent = -1ULL - v;
+		dprint(FD_PARSE, "SET start_offset_percent %d\n",
+					td->o.start_offset_percent);
+	} else
+		td->o.start_offset = v;
 
 	return 0;
 }
@@ -1389,6 +1436,8 @@ static int str_size_cb(void *data, unsigned long long *__val)
 	if (parse_is_percent(v)) {
 		td->o.size = 0;
 		td->o.size_percent = -1ULL - v;
+		dprint(FD_PARSE, "SET size_percent %d\n",
+					td->o.size_percent);
 	} else
 		td->o.size = v;
 
@@ -1436,6 +1485,39 @@ static int str_write_hist_log_cb(void *data, const char *str)
 		td->o.hist_log_file = strdup(str);
 
 	td->o.write_hist_log = 1;
+	return 0;
+}
+
+/*
+ * str is supposed to be a substring of the strdup'd original string,
+ * and is valid only if it's a regular file path.
+ * This function keeps the pointer to the path as needed later.
+ *
+ * "external:/path/to/so\0" <- original pointer updated with strdup'd
+ * "external\0"             <- above pointer after parsed, i.e. ->ioengine
+ *          "/path/to/so\0" <- str argument, i.e. ->ioengine_so_path
+ */
+static int str_ioengine_external_cb(void *data, const char *str)
+{
+	struct thread_data *td = cb_data_to_td(data);
+	struct stat sb;
+	char *p;
+
+	if (!str) {
+		log_err("fio: null external ioengine path\n");
+		return 1;
+	}
+
+	p = (char *)str; /* str is mutable */
+	strip_blank_front(&p);
+	strip_blank_end(p);
+
+	if (stat(p, &sb) || !S_ISREG(sb.st_mode)) {
+		log_err("fio: invalid external ioengine path \"%s\"\n", p);
+		return 1;
+	}
+
+	td->o.ioengine_so_path = p;
 	return 0;
 }
 
@@ -1787,9 +1869,19 @@ struct fio_option fio_options[FIO_MAX_OPTS] = {
 			    .help = "DAX Device based IO engine",
 			  },
 #endif
+			  {
+			    .ival = "filecreate",
+			    .help = "File creation engine",
+			  },
 			  { .ival = "external",
 			    .help = "Load external engine (append name)",
+			    .cb = str_ioengine_external_cb,
 			  },
+#ifdef CONFIG_LIBPMEM
+			  { .ival = "libpmem",
+			    .help = "NVML libpmem based IO engine",
+			  },
+#endif
 		},
 	},
 	{
@@ -1855,6 +1947,17 @@ struct fio_option fio_options[FIO_MAX_OPTS] = {
 		.parent	= "iodepth",
 		.hide	= 1,
 		.interval = 1,
+		.category = FIO_OPT_C_IO,
+		.group	= FIO_OPT_G_IO_BASIC,
+	},
+	{
+		.name	= "serialize_overlap",
+		.lname	= "Serialize overlap",
+		.off1	= offsetof(struct thread_options, serialize_overlap),
+		.type	= FIO_OPT_BOOL,
+		.help	= "Wait for in-flight IOs that collide to complete",
+		.parent	= "iodepth",
+		.def	= "0",
 		.category = FIO_OPT_C_IO,
 		.group	= FIO_OPT_G_IO_BASIC,
 	},
@@ -1938,10 +2041,22 @@ struct fio_option fio_options[FIO_MAX_OPTS] = {
 		.lname	= "IO offset",
 		.alias	= "fileoffset",
 		.type	= FIO_OPT_STR_VAL,
+		.cb	= str_offset_cb,
 		.off1	= offsetof(struct thread_options, start_offset),
 		.help	= "Start IO from this offset",
 		.def	= "0",
 		.interval = 1024 * 1024,
+		.category = FIO_OPT_C_IO,
+		.group	= FIO_OPT_G_INVALID,
+	},
+	{
+		.name	= "offset_align",
+		.lname	= "IO offset alignment",
+		.type	= FIO_OPT_INT,
+		.off1	= offsetof(struct thread_options, start_offset_align),
+		.help	= "Start IO from this offset alignment",
+		.def	= "0",
+		.interval = 512,
 		.category = FIO_OPT_C_IO,
 		.group	= FIO_OPT_G_INVALID,
 	},
@@ -2164,7 +2279,10 @@ struct fio_option fio_options[FIO_MAX_OPTS] = {
 			    .oval = FIO_RAND_DIST_ZONED,
 			    .help = "Zoned random distribution",
 			  },
-
+			  { .ival = "zoned_abs",
+			    .oval = FIO_RAND_DIST_ZONED_ABS,
+			    .help = "Zoned absolute random distribution",
+			  },
 		},
 		.category = FIO_OPT_C_IO,
 		.group	= FIO_OPT_G_RANDOM,
@@ -2245,9 +2363,13 @@ struct fio_option fio_options[FIO_MAX_OPTS] = {
 			    .oval = FIO_FSERVICE_PARETO,
 			    .help = "Pareto randomized",
 			  },
+			  { .ival = "normal",
+			    .oval = FIO_FSERVICE_GAUSS,
+			    .help = "Normal (Gaussian) randomized",
+			  },
 			  { .ival = "gauss",
 			    .oval = FIO_FSERVICE_GAUSS,
-			    .help = "Normal (Gaussian) distribution",
+			    .help = "Alias for normal",
 			  },
 			  { .ival = "roundrobin",
 			    .oval = FIO_FSERVICE_RR,
@@ -2261,14 +2383,14 @@ struct fio_option fio_options[FIO_MAX_OPTS] = {
 		.parent = "nrfiles",
 		.hide	= 1,
 	},
-#ifdef CONFIG_POSIX_FALLOCATE
+#ifdef FIO_HAVE_ANY_FALLOCATE
 	{
 		.name	= "fallocate",
 		.lname	= "Fallocate",
 		.type	= FIO_OPT_STR,
 		.off1	= offsetof(struct thread_options, fallocate_mode),
 		.help	= "Whether pre-allocation is performed when laying out files",
-		.def	= "posix",
+		.def	= "native",
 		.category = FIO_OPT_C_FILE,
 		.group	= FIO_OPT_G_INVALID,
 		.posval	= {
@@ -2276,10 +2398,16 @@ struct fio_option fio_options[FIO_MAX_OPTS] = {
 			    .oval = FIO_FALLOCATE_NONE,
 			    .help = "Do not pre-allocate space",
 			  },
+			  { .ival = "native",
+			    .oval = FIO_FALLOCATE_NATIVE,
+			    .help = "Use native pre-allocation if possible",
+			  },
+#ifdef CONFIG_POSIX_FALLOCATE
 			  { .ival = "posix",
 			    .oval = FIO_FALLOCATE_POSIX,
 			    .help = "Use posix_fallocate()",
 			  },
+#endif
 #ifdef CONFIG_LINUX_FALLOCATE
 			  { .ival = "keep",
 			    .oval = FIO_FALLOCATE_KEEP_SIZE,
@@ -2291,20 +2419,22 @@ struct fio_option fio_options[FIO_MAX_OPTS] = {
 			    .oval = FIO_FALLOCATE_NONE,
 			    .help = "Alias for 'none'",
 			  },
+#ifdef CONFIG_POSIX_FALLOCATE
 			  { .ival = "1",
 			    .oval = FIO_FALLOCATE_POSIX,
 			    .help = "Alias for 'posix'",
 			  },
+#endif
 		},
 	},
-#else	/* CONFIG_POSIX_FALLOCATE */
+#else	/* FIO_HAVE_ANY_FALLOCATE */
 	{
 		.name	= "fallocate",
 		.lname	= "Fallocate",
 		.type	= FIO_OPT_UNSUPPORTED,
 		.help	= "Your platform does not support fallocate",
 	},
-#endif /* CONFIG_POSIX_FALLOCATE */
+#endif /* FIO_HAVE_ANY_FALLOCATE */
 	{
 		.name	= "fadvise_hint",
 		.lname	= "Fadvise hint",
@@ -2333,24 +2463,6 @@ struct fio_option fio_options[FIO_MAX_OPTS] = {
 		.category = FIO_OPT_C_FILE,
 		.group	= FIO_OPT_G_INVALID,
 	},
-#ifdef FIO_HAVE_STREAMID
-	{
-		.name	= "fadvise_stream",
-		.lname	= "Fadvise stream",
-		.type	= FIO_OPT_INT,
-		.off1	= offsetof(struct thread_options, fadvise_stream),
-		.help	= "Use fadvise() to set stream ID",
-		.category = FIO_OPT_C_FILE,
-		.group	= FIO_OPT_G_INVALID,
-	},
-#else
-	{
-		.name	= "fadvise_stream",
-		.lname	= "Fadvise stream",
-		.type	= FIO_OPT_UNSUPPORTED,
-		.help	= "Your platform does not support fadvise stream ID",
-	},
-#endif
 	{
 		.name	= "fsync",
 		.lname	= "Fsync",
@@ -3174,8 +3286,8 @@ struct fio_option fio_options[FIO_MAX_OPTS] = {
 		.type	= FIO_OPT_INT,
 		.off1	= offsetof(struct thread_options, nice),
 		.help	= "Set job CPU nice value",
-		.minval	= -19,
-		.maxval	= 20,
+		.minval	= -20,
+		.maxval	= 19,
 		.def	= "0",
 		.interval = 1,
 		.category = FIO_OPT_C_GENERAL,
@@ -3348,9 +3460,19 @@ struct fio_option fio_options[FIO_MAX_OPTS] = {
 		.group	= FIO_OPT_G_RATE,
 	},
 	{
+		.name	= "rate_ignore_thinktime",
+		.lname	= "Rate ignore thinktime",
+		.type	= FIO_OPT_BOOL,
+		.off1	= offsetof(struct thread_options, rate_ign_think),
+		.help	= "Rated IO ignores thinktime settings",
+		.parent = "rate",
+		.category = FIO_OPT_C_IO,
+		.group	= FIO_OPT_G_RATE,
+	},
+	{
 		.name	= "max_latency",
-		.lname	= "Max Latency",
-		.type	= FIO_OPT_INT,
+		.lname	= "Max Latency (usec)",
+		.type	= FIO_OPT_STR_VAL_TIME,
 		.off1	= offsetof(struct thread_options, max_latency),
 		.help	= "Maximum tolerated IO latency (usec)",
 		.is_time = 1,
@@ -3412,6 +3534,34 @@ struct fio_option fio_options[FIO_MAX_OPTS] = {
 		.category = FIO_OPT_C_IO,
 		.group	= FIO_OPT_G_IO_TYPE,
 	},
+#ifdef FIO_HAVE_WRITE_HINT
+	{
+		.name	= "write_hint",
+		.lname	= "Write hint",
+		.type	= FIO_OPT_STR,
+		.off1	= offsetof(struct thread_options, write_hint),
+		.help	= "Set expected write life time",
+		.category = FIO_OPT_C_ENGINE,
+		.group	= FIO_OPT_G_INVALID,
+		.posval = {
+			  { .ival = "none",
+			    .oval = RWH_WRITE_LIFE_NONE,
+			  },
+			  { .ival = "short",
+			    .oval = RWH_WRITE_LIFE_SHORT,
+			  },
+			  { .ival = "medium",
+			    .oval = RWH_WRITE_LIFE_MEDIUM,
+			  },
+			  { .ival = "long",
+			    .oval = RWH_WRITE_LIFE_LONG,
+			  },
+			  { .ival = "extreme",
+			    .oval = RWH_WRITE_LIFE_EXTREME,
+			  },
+		},
+	},
+#endif
 	{
 		.name	= "create_serialize",
 		.lname	= "Create serialize",
@@ -3961,6 +4111,7 @@ struct fio_option fio_options[FIO_MAX_OPTS] = {
 		.parent	= "buffer_compress_percentage",
 		.hide	= 1,
 		.help	= "Size of compressible region in buffer",
+		.def	= "512",
 		.interval = 256,
 		.category = FIO_OPT_C_IO,
 		.group	= FIO_OPT_G_IO_BUF,
@@ -3985,6 +4136,18 @@ struct fio_option fio_options[FIO_MAX_OPTS] = {
 		.off1	= offsetof(struct thread_options, clat_percentiles),
 		.help	= "Enable the reporting of completion latency percentiles",
 		.def	= "1",
+		.inverse = "lat_percentiles",
+		.category = FIO_OPT_C_STAT,
+		.group	= FIO_OPT_G_INVALID,
+	},
+	{
+		.name	= "lat_percentiles",
+		.lname	= "IO latency percentiles",
+		.type	= FIO_OPT_BOOL,
+		.off1	= offsetof(struct thread_options, lat_percentiles),
+		.help	= "Enable the reporting of IO latency percentiles",
+		.def	= "0",
+		.inverse = "clat_percentiles",
 		.category = FIO_OPT_C_STAT,
 		.group	= FIO_OPT_G_INVALID,
 	},
@@ -4000,6 +4163,19 @@ struct fio_option fio_options[FIO_MAX_OPTS] = {
 		.maxlen	= FIO_IO_U_LIST_MAX_LEN,
 		.minfp	= 0.0,
 		.maxfp	= 100.0,
+		.category = FIO_OPT_C_STAT,
+		.group	= FIO_OPT_G_INVALID,
+	},
+	{
+		.name	= "significant_figures",
+		.lname	= "Significant figures",
+		.type	= FIO_OPT_INT,
+		.off1	= offsetof(struct thread_options, sig_figs),
+		.maxval	= 10,
+		.minval	= 1,
+		.help	= "Significant figures for output-format set to normal",
+		.def	= "4",
+		.interval = 1,
 		.category = FIO_OPT_C_STAT,
 		.group	= FIO_OPT_G_INVALID,
 	},
@@ -4331,17 +4507,6 @@ struct fio_option fio_options[FIO_MAX_OPTS] = {
 		.def	= "0",
 		.category = FIO_OPT_C_IO,
 		.group	= FIO_OPT_G_IO_FLOW,
-	},
-	{
-		.name	= "skip_bad",
-		.lname	= "Skip operations against bad blocks",
-		.type	= FIO_OPT_BOOL,
-		.off1	= offsetof(struct thread_options, skip_bad),
-		.help	= "Skip operations against known bad blocks.",
-		.hide	= 1,
-		.def	= "0",
-		.category = FIO_OPT_C_IO,
-		.group	= FIO_OPT_G_MTD,
 	},
 	{
 		.name   = "steadystate",

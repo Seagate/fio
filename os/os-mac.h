@@ -20,6 +20,7 @@
 #define FIO_USE_GENERIC_INIT_RANDOM_STATE
 #define FIO_HAVE_GETTID
 #define FIO_HAVE_CHARDEV_SIZE
+#define FIO_HAVE_NATIVE_FALLOCATE
 
 #define OS_MAP_ANON		MAP_ANON
 
@@ -40,9 +41,9 @@ typedef unsigned int clockid_t;
 #endif
 
 #define FIO_OS_DIRECTIO
-static inline int fio_set_odirect(int fd)
+static inline int fio_set_odirect(struct fio_file *f)
 {
-	if (fcntl(fd, F_NOCACHE, 1) == -1)
+	if (fcntl(f->fd, F_NOCACHE, 1) == -1)
 		return errno;
 	return 0;
 }
@@ -100,5 +101,16 @@ static inline int gettid(void)
  * if it exists.
  */
 extern int fdatasync(int fd);
+
+static inline bool fio_fallocate(struct fio_file *f, uint64_t offset, uint64_t len)
+{
+	fstore_t store = {F_ALLOCATEALL, F_PEOFPOSMODE, offset, len};
+	if (fcntl(f->fd, F_PREALLOCATE, &store) != -1) {
+		if (ftruncate(f->fd, len) == 0)
+			return true;
+	}
+
+	return false;
+}
 
 #endif

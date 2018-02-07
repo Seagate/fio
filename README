@@ -59,7 +59,8 @@ Mailing list
 ------------
 
 The fio project mailing list is meant for anything related to fio including
-general discussion, bug reporting, questions, and development.
+general discussion, bug reporting, questions, and development. For bug reporting,
+see REPORTING-BUGS.
 
 An automated mail detailing recent commits is automatically sent to the list at
 most daily. The list address is fio@vger.kernel.org, subscribe by sending an
@@ -102,11 +103,15 @@ Ubuntu:
 Red Hat, Fedora, CentOS & Co:
 	Starting with Fedora 9/Extra Packages for Enterprise Linux 4, fio
 	packages are part of the Fedora/EPEL repositories.
-	https://admin.fedoraproject.org/pkgdb/package/rpms/fio/ .
+	https://apps.fedoraproject.org/packages/fio .
 
 Mandriva:
 	Mandriva has integrated fio into their package repository, so installing
 	on that distro should be as easy as typing ``urpmi fio``.
+
+Arch Linux:
+        An Arch Linux package is provided under the Community sub-repository:
+        https://www.archlinux.org/packages/?sort=&q=fio
 
 Solaris:
 	Packages for Solaris are available from OpenCSW. Install their pkgutil
@@ -115,7 +120,9 @@ Solaris:
 
 Windows:
 	Rebecca Cran <rebecca+fio@bluestop.org> has fio packages for Windows at
-	http://www.bluestop.org/fio/ .
+	https://www.bluestop.org/fio/ . The latest builds for Windows can also
+	be grabbed from https://ci.appveyor.com/project/axboe/fio by clicking
+	the latest x86 or x64 build, then selecting the ARTIFACTS tab.
 
 BSDs:
 	Packages for BSDs may be available from their binary package repositories.
@@ -176,7 +183,9 @@ To build fio on 32-bit Windows, run ``./configure --build-32bit-win`` before
 It's recommended that once built or installed, fio be run in a Command Prompt or
 other 'native' console such as console2, since there are known to be display and
 signal issues when running it under a Cygwin shell (see
-http://code.google.com/p/mintty/issues/detail?id=56 for details).
+https://github.com/mintty/mintty/issues/56 and
+https://github.com/mintty/mintty/wiki/Tips#inputoutput-interaction-with-alien-programs
+for details).
 
 
 Documentation

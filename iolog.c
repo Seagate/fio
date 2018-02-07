@@ -65,7 +65,7 @@ static void iolog_delay(struct thread_data *td, unsigned long delay)
 {
 	uint64_t usec = utime_since_now(&td->last_issue);
 	uint64_t this_delay;
-	struct timeval tv;
+	struct timespec ts;
 
 	if (delay < td->time_offset) {
 		td->time_offset = 0;
@@ -78,7 +78,7 @@ static void iolog_delay(struct thread_data *td, unsigned long delay)
 
 	delay -= usec;
 
-	fio_gettime(&tv, NULL);
+	fio_gettime(&ts, NULL);
 	while (delay && !td->terminate) {
 		this_delay = delay;
 		if (this_delay > 500000)
@@ -88,7 +88,7 @@ static void iolog_delay(struct thread_data *td, unsigned long delay)
 		delay -= this_delay;
 	}
 
-	usec = utime_since_now(&tv);
+	usec = utime_since_now(&ts);
 	if (usec > delay)
 		td->time_offset = usec - delay;
 	else
@@ -227,21 +227,16 @@ void log_io_piece(struct thread_data *td, struct io_u *io_u)
 	}
 
 	/*
-	 * We don't need to sort the entries, if:
+	 * We don't need to sort the entries if we only performed sequential
+	 * writes. In this case, just reading back data in the order we wrote
+	 * it out is the faster but still safe.
 	 *
-	 *	Sequential writes, or
-	 *	Random writes that lay out the file as it goes along
-	 *
-	 * For both these cases, just reading back data in the order we
-	 * wrote it out is the fastest.
-	 *
-	 * One exception is if we don't have a random map AND we are doing
-	 * verifies, in that case we need to check for duplicate blocks and
-	 * drop the old one, which we rely on the rb insert/lookup for
-	 * handling.
+	 * One exception is if we don't have a random map in which case we need
+	 * to check for duplicate blocks and drop the old one, which we rely on
+	 * the rb insert/lookup for handling.
 	 */
-	if (((!td->o.verifysort) || !td_random(td) || !td->o.overwrite) &&
-	      (file_randommap(td, ipo->file) || td->o.verify == VERIFY_NONE)) {
+	if (((!td->o.verifysort) || !td_random(td)) &&
+	      file_randommap(td, ipo->file)) {
 		INIT_FLIST_HEAD(&ipo->list);
 		flist_add_tail(&ipo->list, &td->io_hist_list);
 		ipo->flags |= IP_F_ONLIST;
@@ -284,7 +279,8 @@ restart:
 			td->io_hist_len--;
 			rb_erase(parent, &td->io_hist_tree);
 			remove_trim_entry(td, __ipo);
-			free(__ipo);
+			if (!(__ipo->flags & IP_F_IN_FLIGHT))
+				free(__ipo);
 			goto restart;
 		}
 	}
@@ -643,6 +639,7 @@ void setup_log(struct io_log **log, struct log_params *p,
 		l->log_gz = 0;
 	else if (l->log_gz || l->log_gz_store) {
 		mutex_init_pshared(&l->chunk_lock);
+		mutex_init_pshared(&l->deferred_free_lock);
 		p->td->flags |= TD_F_COMPRESS_LOG;
 	}
 
@@ -1144,6 +1141,42 @@ size_t log_chunk_sizes(struct io_log *log)
 
 #ifdef CONFIG_ZLIB
 
+static bool warned_on_drop;
+
+static void iolog_put_deferred(struct io_log *log, void *ptr)
+{
+	if (!ptr)
+		return;
+
+	pthread_mutex_lock(&log->deferred_free_lock);
+	if (log->deferred < IOLOG_MAX_DEFER) {
+		log->deferred_items[log->deferred] = ptr;
+		log->deferred++;
+	} else if (!warned_on_drop) {
+		log_err("fio: had to drop log entry free\n");
+		warned_on_drop = true;
+	}
+	pthread_mutex_unlock(&log->deferred_free_lock);
+}
+
+static void iolog_free_deferred(struct io_log *log)
+{
+	int i;
+
+	if (!log->deferred)
+		return;
+
+	pthread_mutex_lock(&log->deferred_free_lock);
+
+	for (i = 0; i < log->deferred; i++) {
+		free(log->deferred_items[i]);
+		log->deferred_items[i] = NULL;
+	}
+
+	log->deferred = 0;
+	pthread_mutex_unlock(&log->deferred_free_lock);
+}
+
 static int gz_work(struct iolog_flush_data *data)
 {
 	struct iolog_compress *c = NULL;
@@ -1236,7 +1269,7 @@ static int gz_work(struct iolog_flush_data *data)
 	if (ret != Z_OK)
 		log_err("fio: deflateEnd %d\n", ret);
 
-	free(data->samples);
+	iolog_put_deferred(data->log, data->samples);
 
 	if (!flist_empty(&list)) {
 		pthread_mutex_lock(&data->log->chunk_lock);
@@ -1247,7 +1280,7 @@ static int gz_work(struct iolog_flush_data *data)
 	ret = 0;
 done:
 	if (data->free)
-		free(data);
+		sfree(data);
 	return ret;
 err:
 	while (!flist_empty(&list)) {
@@ -1348,7 +1381,7 @@ int iolog_cur_flush(struct io_log *log, struct io_logs *cur_log)
 {
 	struct iolog_flush_data *data;
 
-	data = malloc(sizeof(*data));
+	data = smalloc(sizeof(*data));
 	if (!data)
 		return 1;
 
@@ -1362,6 +1395,9 @@ int iolog_cur_flush(struct io_log *log, struct io_logs *cur_log)
 	cur_log->log = NULL;
 
 	workqueue_enqueue(&log->td->log_compress_wq, &data->work);
+
+	iolog_free_deferred(log);
+
 	return 0;
 }
 #else

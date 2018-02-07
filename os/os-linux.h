@@ -71,7 +71,7 @@ typedef struct drand48_data os_random_state_t;
 
 #define fio_cpu_clear(mask, cpu)	(void) CPU_CLR((cpu), (mask))
 #define fio_cpu_set(mask, cpu)		(void) CPU_SET((cpu), (mask))
-#define fio_cpu_isset(mask, cpu)	CPU_ISSET((cpu), (mask))
+#define fio_cpu_isset(mask, cpu)	(CPU_ISSET((cpu), (mask)) != 0)
 #define fio_cpu_count(mask)		CPU_COUNT((mask))
 
 static inline int fio_cpuset_init(os_cpu_mask_t *mask)
@@ -281,7 +281,7 @@ static inline unsigned long long get_fs_free_size(const char *path)
 	return ret;
 }
 
-static inline int os_trim(int fd, unsigned long long start,
+static inline int os_trim(struct fio_file *f, unsigned long long start,
 			  unsigned long long len)
 {
 	uint64_t range[2];
@@ -289,7 +289,7 @@ static inline int os_trim(int fd, unsigned long long start,
 	range[0] = start;
 	range[1] = len;
 
-	if (!ioctl(fd, BLKDISCARD, range))
+	if (!ioctl(f->fd, BLKDISCARD, range))
 		return 0;
 
 	return errno;
@@ -303,11 +303,26 @@ static inline int fio_set_sched_idle(void)
 }
 #endif
 
-#ifndef POSIX_FADV_STREAMID
-#define POSIX_FADV_STREAMID	8
+#ifndef F_GET_RW_HINT
+#ifndef F_LINUX_SPECIFIC_BASE
+#define F_LINUX_SPECIFIC_BASE	1024
+#endif
+#define F_GET_RW_HINT		(F_LINUX_SPECIFIC_BASE + 11)
+#define F_SET_RW_HINT		(F_LINUX_SPECIFIC_BASE + 12)
+#define F_GET_FILE_RW_HINT	(F_LINUX_SPECIFIC_BASE + 13)
+#define F_SET_FILE_RW_HINT	(F_LINUX_SPECIFIC_BASE + 14)
 #endif
 
-#define FIO_HAVE_STREAMID
+#ifndef RWH_WRITE_LIFE_NONE
+#define RWH_WRITE_LIFE_NOT_SET	0
+#define RWH_WRITE_LIFE_NONE	1
+#define RWH_WRITE_LIFE_SHORT	2
+#define RWH_WRITE_LIFE_MEDIUM	3
+#define RWH_WRITE_LIFE_LONG	4
+#define RWH_WRITE_LIFE_EXTREME	5
+#endif
+
+#define FIO_HAVE_WRITE_HINT
 
 #ifndef RWF_HIPRI
 #define RWF_HIPRI	0x00000001
@@ -317,6 +332,14 @@ static inline int fio_set_sched_idle(void)
 #endif
 #ifndef RWF_SYNC
 #define RWF_SYNC	0x00000004
+#endif
+
+#ifndef RWF_WRITE_LIFE_SHIFT
+#define RWF_WRITE_LIFE_SHIFT		4
+#define RWF_WRITE_LIFE_SHORT		(1 << RWF_WRITE_LIFE_SHIFT)
+#define RWF_WRITE_LIFE_MEDIUM		(2 << RWF_WRITE_LIFE_SHIFT)
+#define RWF_WRITE_LIFE_LONG		(3 << RWF_WRITE_LIFE_SHIFT)
+#define RWF_WRITE_LIFE_EXTREME		(4 << RWF_WRITE_LIFE_SHIFT)
 #endif
 
 #ifndef CONFIG_PWRITEV2
@@ -368,5 +391,23 @@ static inline int shm_attach_to_open_removed(void)
 {
 	return 1;
 }
+
+#ifdef CONFIG_LINUX_FALLOCATE
+#define FIO_HAVE_NATIVE_FALLOCATE
+static inline bool fio_fallocate(struct fio_file *f, uint64_t offset,
+				 uint64_t len)
+{
+	int ret;
+	ret = fallocate(f->fd, 0, 0, len);
+	if (ret == 0)
+		return true;
+
+	/* Work around buggy old glibc versions... */
+	if (ret > 0)
+		errno = ret;
+
+	return false;
+}
+#endif
 
 #endif

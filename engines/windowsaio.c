@@ -35,17 +35,7 @@ struct thread_ctx {
 	struct windowsaio_data *wd;
 };
 
-static BOOL timeout_expired(DWORD start_count, DWORD end_count);
-static int fio_windowsaio_getevents(struct thread_data *td, unsigned int min,
-				unsigned int max, const struct timespec *t);
-static struct io_u *fio_windowsaio_event(struct thread_data *td, int event);
-static int fio_windowsaio_queue(struct thread_data *td,
-				  struct io_u *io_u);
-static void fio_windowsaio_cleanup(struct thread_data *td);
 static DWORD WINAPI IoCompletionRoutine(LPVOID lpParameter);
-static int fio_windowsaio_init(struct thread_data *td);
-static int fio_windowsaio_open_file(struct thread_data *td, struct fio_file *f);
-static int fio_windowsaio_close_file(struct thread_data fio_unused *td, struct fio_file *f);
 
 static int fio_windowsaio_init(struct thread_data *td)
 {
@@ -104,15 +94,13 @@ static int fio_windowsaio_init(struct thread_data *td)
 		if (!rc)
 			ctx = malloc(sizeof(struct thread_ctx));
 
-		if (!rc && ctx == NULL)
-		{
+		if (!rc && ctx == NULL) {
 			log_err("windowsaio: failed to allocate memory for thread context structure\n");
 			CloseHandle(hFile);
 			rc = 1;
 		}
 
-		if (!rc)
-		{
+		if (!rc) {
 			DWORD threadid;
 
 			ctx->iocp = hFile;
@@ -152,6 +140,43 @@ static void fio_windowsaio_cleanup(struct thread_data *td)
 	}
 }
 
+static int windowsaio_invalidate_cache(struct fio_file *f)
+{
+	DWORD error;
+	DWORD isharemode = (FILE_SHARE_DELETE | FILE_SHARE_READ |
+				FILE_SHARE_WRITE);
+	HANDLE ihFile;
+	int rc = 0;
+
+	/*
+	 * Encourage Windows to drop cached parts of a file by temporarily
+	 * opening it for non-buffered access. Note: this will only work when
+	 * the following is the only thing with the file open on the whole
+	 * system.
+	 */
+	dprint(FD_IO, "windowaio: attempt invalidate cache for %s\n",
+			f->file_name);
+	ihFile = CreateFile(f->file_name, 0, isharemode, NULL, OPEN_EXISTING,
+			FILE_FLAG_NO_BUFFERING, NULL);
+
+	if (ihFile != INVALID_HANDLE_VALUE) {
+		if (!CloseHandle(ihFile)) {
+			error = GetLastError();
+			log_info("windowsaio: invalidation fd close %s "
+				 "failed: error %d\n", f->file_name, error);
+			rc = 1;
+		}
+	} else {
+		error = GetLastError();
+		if (error != ERROR_FILE_NOT_FOUND) {
+			log_info("windowsaio: cache invalidation of %s failed: "
+					"error %d\n", f->file_name, error);
+			rc = 1;
+		}
+	}
+
+	return rc;
+}
 
 static int fio_windowsaio_open_file(struct thread_data *td, struct fio_file *f)
 {
@@ -180,13 +205,26 @@ static int fio_windowsaio_open_file(struct thread_data *td, struct fio_file *f)
 
 	/*
 	 * Inform Windows whether we're going to be doing sequential or
-	 * random io so it can tune the Cache Manager
+	 * random IO so it can tune the Cache Manager
 	 */
-	if (td->o.td_ddir == TD_DDIR_READ  ||
-		td->o.td_ddir == TD_DDIR_WRITE)
-		flags |= FILE_FLAG_SEQUENTIAL_SCAN;
-	else
+	switch (td->o.fadvise_hint) {
+	case F_ADV_TYPE:
+		if (td_random(td))
+			flags |= FILE_FLAG_RANDOM_ACCESS;
+		else
+			flags |= FILE_FLAG_SEQUENTIAL_SCAN;
+		break;
+	case F_ADV_RANDOM:
 		flags |= FILE_FLAG_RANDOM_ACCESS;
+		break;
+	case F_ADV_SEQUENTIAL:
+		flags |= FILE_FLAG_SEQUENTIAL_SCAN;
+		break;
+	case F_ADV_NONE:
+		break;
+	default:
+		log_err("fio: unknown fadvise type %d\n", td->o.fadvise_hint);
+	}
 
 	if (!td_write(td) || read_only)
 		access = GENERIC_READ;
@@ -197,6 +235,11 @@ static int fio_windowsaio_open_file(struct thread_data *td, struct fio_file *f)
 		openmode = OPEN_ALWAYS;
 	else
 		openmode = OPEN_EXISTING;
+
+	/* If we're going to use direct I/O, Windows will try and invalidate
+	 * its cache at that point so there's no need to do it here */
+	if (td->o.invalidate_cache && !td->o.odirect)
+		windowsaio_invalidate_cache(f);
 
 	f->hFile = CreateFile(f->file_name, access, sharemode,
 		NULL, openmode, flags, NULL);
@@ -303,7 +346,8 @@ static int fio_windowsaio_getevents(struct thread_data *td, unsigned int min,
 				break;
 		}
 
-		if (dequeued >= min || (t != NULL && timeout_expired(start_count, end_count)))
+		if (dequeued >= min ||
+		    (t != NULL && timeout_expired(start_count, end_count)))
 			break;
 	} while (1);
 
@@ -326,10 +370,12 @@ static int fio_windowsaio_queue(struct thread_data *td, struct io_u *io_u)
 
 	switch (io_u->ddir) {
 	case DDIR_WRITE:
-		success = WriteFile(io_u->file->hFile, io_u->xfer_buf, io_u->xfer_buflen, NULL, lpOvl);
+		success = WriteFile(io_u->file->hFile, io_u->xfer_buf,
+					io_u->xfer_buflen, NULL, lpOvl);
 		break;
 	case DDIR_READ:
-		success = ReadFile(io_u->file->hFile, io_u->xfer_buf, io_u->xfer_buflen, NULL, lpOvl);
+		success = ReadFile(io_u->file->hFile, io_u->xfer_buf,
+					io_u->xfer_buflen, NULL, lpOvl);
 		break;
 	case DDIR_SYNC:
 	case DDIR_DATASYNC:
@@ -341,13 +387,11 @@ static int fio_windowsaio_queue(struct thread_data *td, struct io_u *io_u)
 		}
 
 		return FIO_Q_COMPLETED;
-		break;
 	case DDIR_TRIM:
 		log_err("windowsaio: manual TRIM isn't supported on Windows\n");
 		io_u->error = 1;
 		io_u->resid = io_u->xfer_buflen;
 		return FIO_Q_COMPLETED;
-		break;
 	default:
 		assert(0);
 		break;
@@ -378,7 +422,11 @@ static DWORD WINAPI IoCompletionRoutine(LPVOID lpParameter)
 	wd = ctx->wd;
 
 	do {
-		if (!GetQueuedCompletionStatus(ctx->iocp, &bytes, &ulKey, &ovl, 250) && ovl == NULL)
+		BOOL ret;
+
+		ret = GetQueuedCompletionStatus(ctx->iocp, &bytes, &ulKey,
+						&ovl, 250);
+		if (!ret && ovl == NULL)
 			continue;
 
 		fov = CONTAINING_RECORD(ovl, struct fio_overlapped, o);

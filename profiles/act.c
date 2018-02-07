@@ -47,19 +47,11 @@ struct act_run_data {
 static struct act_run_data *act_run_data;
 
 struct act_prof_data {
-	struct timeval sample_tv;
+	struct timespec sample_tv;
 	struct act_slice *slices;
 	unsigned int cur_slice;
 	unsigned int nr_slices;
 };
-
-static char *device_names;
-static unsigned int load;
-static unsigned int prep;
-static unsigned int threads_per_queue;
-static unsigned int num_read_blocks;
-static unsigned int write_size;
-static unsigned long long test_duration;
 
 #define ACT_MAX_OPTS	128
 static const char *act_opts[ACT_MAX_OPTS] = {
@@ -97,6 +89,7 @@ static struct fio_option options[] = {
 		.help	= "Devices to use",
 		.category = FIO_OPT_C_PROFILE,
 		.group	= FIO_OPT_G_ACT,
+		.no_free = true,
 	},
 	{
 		.name	= "load",
@@ -185,6 +178,8 @@ static int act_add_opt(const char *str, ...)
 
 static int act_add_rw(const char *dev, int reads)
 {
+	struct act_options *ao = &act_options;
+
 	if (act_add_opt("name=act-%s-%s", reads ? "read" : "write", dev))
 		return 1;
 	if (act_add_opt("filename=%s", dev))
@@ -192,21 +187,21 @@ static int act_add_rw(const char *dev, int reads)
 	if (act_add_opt("rw=%s", reads ? "randread" : "randwrite"))
 		return 1;
 	if (reads) {
-		int rload = load * R_LOAD / threads_per_queue;
+		int rload = ao->load * R_LOAD / ao->threads_per_queue;
 
-		if (act_add_opt("numjobs=%u", threads_per_queue))
+		if (act_add_opt("numjobs=%u", ao->threads_per_queue))
 			return 1;
 		if (act_add_opt("rate_iops=%u", rload))
 			return 1;
-		if (act_add_opt("bs=%u", num_read_blocks * 512))
+		if (act_add_opt("bs=%u", ao->num_read_blocks * 512))
 			return 1;
 	} else {
-		const int rsize = write_size / (num_read_blocks * 512);
-		int wload = (load * W_LOAD + rsize - 1) / rsize;
+		const int rsize = ao->write_size / (ao->num_read_blocks * 512);
+		int wload = (ao->load * W_LOAD + rsize - 1) / rsize;
 
 		if (act_add_opt("rate_iops=%u", wload))
 			return 1;
-		if (act_add_opt("bs=%u", write_size))
+		if (act_add_opt("bs=%u", ao->write_size))
 			return 1;
 	}
 
@@ -248,10 +243,10 @@ static int act_add_dev_prep(const char *dev)
 
 static int act_add_dev(const char *dev)
 {
-	if (prep)
+	if (act_options.prep)
 		return act_add_dev_prep(dev);
 
-	if (act_add_opt("runtime=%llus", test_duration))
+	if (act_add_opt("runtime=%llus", act_options.test_duration))
 		return 1;
 	if (act_add_opt("time_based=1"))
 		return 1;
@@ -269,7 +264,7 @@ static int act_add_dev(const char *dev)
  */
 static int act_prep_cmdline(void)
 {
-	if (!device_names) {
+	if (!act_options.device_names) {
 		log_err("act: you need to set IO target(s) with the "
 			"device-names option.\n");
 		return 1;
@@ -280,7 +275,7 @@ static int act_prep_cmdline(void)
 	do {
 		char *dev;
 
-		dev = strsep(&device_names, ",");
+		dev = strsep(&act_options.device_names, ",");
 		if (!dev)
 			break;
 
@@ -293,14 +288,15 @@ static int act_prep_cmdline(void)
 	return 0;
 }
 
-static int act_io_u_lat(struct thread_data *td, uint64_t usec)
+static int act_io_u_lat(struct thread_data *td, uint64_t nsec)
 {
 	struct act_prof_data *apd = td->prof_data;
 	struct act_slice *slice;
+	uint64_t usec = nsec / 1000ULL;
 	int i, ret = 0;
 	double perm;
 
-	if (prep)
+	if (act_options.prep)
 		return 0;
 
 	/*
@@ -431,7 +427,7 @@ static int act_td_init(struct thread_data *td)
 	get_act_ref();
 
 	apd = calloc(1, sizeof(*apd));
-	nr_slices = (test_duration + SAMPLE_SEC - 1) / SAMPLE_SEC;
+	nr_slices = (act_options.test_duration + SAMPLE_SEC - 1) / SAMPLE_SEC;
 	apd->slices = calloc(nr_slices, sizeof(struct act_slice));
 	apd->nr_slices = nr_slices;
 	fio_gettime(&apd->sample_tv, NULL);

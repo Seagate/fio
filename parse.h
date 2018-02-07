@@ -20,7 +20,7 @@ enum fio_opt_type {
 	FIO_OPT_FLOAT_LIST,
 	FIO_OPT_STR_SET,
 	FIO_OPT_DEPRECATED,
-	FIO_OPT_UNSUPPORTED,
+	FIO_OPT_UNSUPPORTED,	/* keep this last */
 };
 
 /*
@@ -78,6 +78,7 @@ struct fio_option {
 	int is_time;			/* time based value */
 	int no_warn_def;
 	int pow2;			/* must be a power-of-2 */
+	int no_free;
 };
 
 extern int parse_option(char *, const char *, struct fio_option *, struct fio_option **, void *, struct flist_head *);

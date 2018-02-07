@@ -1,5 +1,6 @@
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <dirent.h>
 #include <string.h>
 #include <stdio.h>
@@ -20,7 +21,7 @@ int blktrace_lookup_device(const char *redirect, char *path, unsigned int maj,
 		return 0;
 
 	while ((dir = readdir(D)) != NULL) {
-		char full_path[256];
+		char full_path[257];
 
 		if (!strcmp(dir->d_name, ".") || !strcmp(dir->d_name, ".."))
 			continue;

@@ -6,6 +6,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 
+#include "lib/types.h"
 #include "stat.h"
 
 struct fio_net_cmd;
@@ -38,6 +39,7 @@ struct fio_client {
 	int port;
 	int fd;
 	unsigned int refs;
+	unsigned int last_cmd;
 
 	char *name;
 
@@ -45,16 +47,16 @@ struct fio_client {
 
 	int state;
 
-	int skip_newline;
-	int is_sock;
-	int disk_stats_shown;
+	bool skip_newline;
+	bool is_sock;
+	bool disk_stats_shown;
 	unsigned int jobs;
 	unsigned int nr_stat;
 	int error;
 	int signal;
 	int ipv6;
-	int sent_job;
-	int did_stat;
+	bool sent_job;
+	bool did_stat;
 	uint32_t type;
 
 	uint32_t thread_number;

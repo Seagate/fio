@@ -3,6 +3,7 @@
 #include <sys/time.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <dirent.h>
 #include <libgen.h>
 #include <math.h>
@@ -84,7 +85,7 @@ static int get_io_ticks(struct disk_util *du, struct disk_util_stat *dus)
 static void update_io_tick_disk(struct disk_util *du)
 {
 	struct disk_util_stat __dus, *dus, *ldus;
-	struct timeval t;
+	struct timespec t;
 
 	if (!du->users)
 		return;
@@ -363,7 +364,7 @@ static int find_block_dir(int majdev, int mindev, char *path, int link_ok)
 		return 0;
 
 	while ((dir = readdir(D)) != NULL) {
-		char full_path[256];
+		char full_path[257];
 
 		if (!strcmp(dir->d_name, ".") || !strcmp(dir->d_name, ".."))
 			continue;

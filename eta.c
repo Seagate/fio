@@ -9,7 +9,7 @@
 #include "lib/pow2.h"
 
 static char __run_str[REAL_MAX_JOBS + 1];
-static char run_str[__THREAD_RUNSTR_SZ(REAL_MAX_JOBS)];
+static char run_str[__THREAD_RUNSTR_SZ(REAL_MAX_JOBS) + 1];
 
 static void update_condensed_str(char *rstr, char *run_str_condensed)
 {
@@ -348,6 +348,14 @@ static void calc_iops(int unified_rw_rep, unsigned long mtime,
 }
 
 /*
+ * Allow a little slack - if we're within 95% of the time, allow ETA.
+ */
+bool eta_time_within_slack(unsigned int time)
+{
+	return time > ((eta_interval_msec * 95) / 100);
+}
+
+/*
  * Print status of the jobs we know about. This includes rate estimates,
  * ETA, thread state, etc.
  */
@@ -358,12 +366,12 @@ bool calc_thread_status(struct jobs_eta *je, int force)
 	uint64_t rate_time, disp_time, bw_avg_time, *eta_secs;
 	unsigned long long io_bytes[DDIR_RWDIR_CNT];
 	unsigned long long io_iops[DDIR_RWDIR_CNT];
-	struct timeval now;
+	struct timespec now;
 
 	static unsigned long long rate_io_bytes[DDIR_RWDIR_CNT];
 	static unsigned long long disp_io_bytes[DDIR_RWDIR_CNT];
 	static unsigned long long disp_io_iops[DDIR_RWDIR_CNT];
-	static struct timeval rate_prev_time, disp_prev_time;
+	static struct timespec rate_prev_time, disp_prev_time;
 
 	if (!force) {
 		if (!(output_format & FIO_OUTPUT_NORMAL) &&
@@ -489,10 +497,7 @@ bool calc_thread_status(struct jobs_eta *je, int force)
 
 	disp_time = mtime_since(&disp_prev_time, &now);
 
-	/*
-	 * Allow a little slack, the target is to print it every 1000 msecs
-	 */
-	if (!force && disp_time < 900)
+	if (!force && !eta_time_within_slack(disp_time))
 		return false;
 
 	calc_rate(unified_rw_rep, disp_time, io_bytes, disp_io_bytes, je->rate);
@@ -511,11 +516,11 @@ bool calc_thread_status(struct jobs_eta *je, int force)
 
 void display_thread_status(struct jobs_eta *je)
 {
-	static struct timeval disp_eta_new_line;
+	static struct timespec disp_eta_new_line;
 	static int eta_new_line_init, eta_new_line_pending;
 	static int linelen_last;
 	static int eta_good;
-	char output[REAL_MAX_JOBS + 512], *p = output;
+	char output[__THREAD_RUNSTR_SZ(REAL_MAX_JOBS) + 512], *p = output;
 	char eta_str[128];
 	double perc = 0.0;
 
@@ -526,6 +531,7 @@ void display_thread_status(struct jobs_eta *je)
 
 	if (eta_new_line_pending) {
 		eta_new_line_pending = 0;
+		linelen_last = 0;
 		p += sprintf(p, "\n");
 	}
 
@@ -537,9 +543,9 @@ void display_thread_status(struct jobs_eta *je)
 		char *tr, *mr;
 
 		mr = num2str(je->m_rate[0] + je->m_rate[1] + je->m_rate[2],
-				4, 0, je->is_pow2, N2S_BYTEPERSEC);
+				je->sig_figs, 0, je->is_pow2, N2S_BYTEPERSEC);
 		tr = num2str(je->t_rate[0] + je->t_rate[1] + je->t_rate[2],
-				4, 0, je->is_pow2, N2S_BYTEPERSEC);
+				je->sig_figs, 0, je->is_pow2, N2S_BYTEPERSEC);
 
 		p += sprintf(p, ", %s-%s", mr, tr);
 		free(tr);
@@ -559,6 +565,7 @@ void display_thread_status(struct jobs_eta *je)
 		size_t left;
 		int l;
 		int ddir;
+		int linelen;
 
 		if ((!je->eta_sec && !eta_good) || je->nr_ramp == je->nr_running ||
 		    je->eta_sec == -1)
@@ -596,10 +603,14 @@ void display_thread_status(struct jobs_eta *je)
 				rate_str[DDIR_READ], rate_str[DDIR_WRITE],
 				iops_str[DDIR_READ], iops_str[DDIR_WRITE],
 				eta_str);
+		/* If truncation occurred adjust l so p is on the null */
+		if (l >= left)
+			l = left - 1;
 		p += l;
-		if (l >= 0 && l < linelen_last)
-			p += sprintf(p, "%*s", linelen_last - l, "");
-		linelen_last = l;
+		linelen = p - output;
+		if (l >= 0 && linelen < linelen_last)
+			p += sprintf(p, "%*s", linelen_last - linelen, "");
+		linelen_last = linelen;
 
 		for (ddir = 0; ddir < DDIR_RWDIR_CNT; ddir++) {
 			free(rate_str[ddir]);

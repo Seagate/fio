@@ -5,6 +5,7 @@
 #include "thread_options.h"
 #include "lib/ieee754.h"
 
+extern void steadystate_free(struct thread_data *);
 extern void steadystate_check(void);
 extern void steadystate_setup(void);
 extern int td_steadystate_init(struct thread_data *);
@@ -35,25 +36,34 @@ struct steadystate_data {
 	uint64_t sum_xy;
 	uint64_t oldest_y;
 
-	struct timeval prev_time;
+	struct timespec prev_time;
 	uint64_t prev_iops;
 	uint64_t prev_bytes;
 };
 
 enum {
-	__FIO_SS_IOPS		= 1,
-	__FIO_SS_BW		= 2,
-	__FIO_SS_SLOPE		= 4,
-	__FIO_SS_ATTAINED	= 8,
-	__FIO_SS_RAMP_OVER	= 16,
-	__FIO_SS_DATA		= 32,
-	__FIO_SS_PCT		= 64,
-	__FIO_SS_BUFFER_FULL	= 128,
+	__FIO_SS_IOPS = 0,
+	__FIO_SS_BW,
+	__FIO_SS_SLOPE,
+	__FIO_SS_ATTAINED,
+	__FIO_SS_RAMP_OVER,
+	__FIO_SS_DATA,
+	__FIO_SS_PCT,
+	__FIO_SS_BUFFER_FULL,
+};
 
-	FIO_SS_IOPS		= __FIO_SS_IOPS,
-	FIO_SS_IOPS_SLOPE	= __FIO_SS_IOPS | __FIO_SS_SLOPE,
-	FIO_SS_BW		= __FIO_SS_BW,
-	FIO_SS_BW_SLOPE		= __FIO_SS_BW | __FIO_SS_SLOPE,
+enum {
+	FIO_SS_IOPS		= 1 << __FIO_SS_IOPS,
+	FIO_SS_BW		= 1 << __FIO_SS_BW,
+	FIO_SS_SLOPE		= 1 << __FIO_SS_SLOPE,
+	FIO_SS_ATTAINED		= 1 << __FIO_SS_ATTAINED,
+	FIO_SS_RAMP_OVER	= 1 << __FIO_SS_RAMP_OVER,
+	FIO_SS_DATA		= 1 << __FIO_SS_DATA,
+	FIO_SS_PCT		= 1 << __FIO_SS_PCT,
+	FIO_SS_BUFFER_FULL	= 1 << __FIO_SS_BUFFER_FULL,
+
+	FIO_SS_IOPS_SLOPE	= FIO_SS_IOPS | FIO_SS_SLOPE,
+	FIO_SS_BW_SLOPE		= FIO_SS_BW | FIO_SS_SLOPE,
 };
 
 #define STEADYSTATE_MSEC	1000

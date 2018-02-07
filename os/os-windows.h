@@ -17,6 +17,7 @@
 #include "../log.h"
 #include "../lib/hweight.h"
 #include "../oslib/strcasestr.h"
+#include "../lib/types.h"
 
 #include "windows/posix.h"
 
@@ -37,7 +38,7 @@ int rand_r(unsigned *);
 
 #define FIO_PREFERRED_ENGINE		"windowsaio"
 #define FIO_PREFERRED_CLOCK_SOURCE	CS_CGETTIME
-#define FIO_OS_PATH_SEPARATOR		"\\"
+#define FIO_OS_PATH_SEPARATOR		'\\'
 
 #define FIO_MAX_CPUS	MAXIMUM_PROCESSORS
 
@@ -209,17 +210,17 @@ static inline int fio_getaffinity(int pid, os_cpu_mask_t *mask)
 
 static inline void fio_cpu_clear(os_cpu_mask_t *mask, int cpu)
 {
-	*mask ^= 1 << (cpu-1);
+	*mask &= ~(1ULL << cpu);
 }
 
 static inline void fio_cpu_set(os_cpu_mask_t *mask, int cpu)
 {
-	*mask |= 1 << cpu;
+	*mask |= 1ULL << cpu;
 }
 
 static inline int fio_cpu_isset(os_cpu_mask_t *mask, int cpu)
 {
-	return (*mask & (1U << cpu));
+	return (*mask & (1ULL << cpu)) != 0;
 }
 
 static inline int fio_cpu_count(os_cpu_mask_t *mask)

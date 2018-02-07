@@ -18,7 +18,7 @@
  *
  *  You should have received a copy of the GNU General Public License
  *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+ *  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
  */
 
@@ -98,7 +98,7 @@ static void reset_io_counters(struct thread_data *td, int all)
 
 	td->zone_bytes = 0;
 
-	td->last_was_sync = 0;
+	td->last_was_sync = false;
 	td->rwmix_issues = 0;
 
 	/*
@@ -144,10 +144,10 @@ void reset_all_stats(struct thread_data *td)
 	}
 
 	set_epoch_time(td, td->o.log_unix_epoch);
-	memcpy(&td->start, &td->epoch, sizeof(struct timeval));
-	memcpy(&td->iops_sample_time, &td->epoch, sizeof(struct timeval));
-	memcpy(&td->bw_sample_time, &td->epoch, sizeof(struct timeval));
-	memcpy(&td->ss.prev_time, &td->epoch, sizeof(struct timeval));
+	memcpy(&td->start, &td->epoch, sizeof(td->epoch));
+	memcpy(&td->iops_sample_time, &td->epoch, sizeof(td->epoch));
+	memcpy(&td->bw_sample_time, &td->epoch, sizeof(td->epoch));
+	memcpy(&td->ss.prev_time, &td->epoch, sizeof(td->epoch));
 
 	lat_target_reset(td);
 	clear_rusage_stat(td);
@@ -230,7 +230,7 @@ void fio_mark_td_terminate(struct thread_data *td)
 {
 	fio_gettime(&td->terminate_time, NULL);
 	write_barrier();
-	td->terminate = 1;
+	td->terminate = true;
 }
 
 void fio_terminate_threads(unsigned int group_id)
@@ -364,6 +364,9 @@ int initialize_fio(char *envp[])
 	compiletime_assert((offsetof(struct thread_options_pack, percentile_list) % 8) == 0, "percentile_list");
 	compiletime_assert((offsetof(struct thread_options_pack, latency_percentile) % 8) == 0, "latency_percentile");
 	compiletime_assert((offsetof(struct jobs_eta, m_rate) % 8) == 0, "m_rate");
+
+	compiletime_assert(__TD_F_LAST <= TD_ENG_FLAG_SHIFT, "TD_ENG_FLAG_SHIFT");
+	compiletime_assert(BSSPLIT_MAX <= ZONESPLIT_MAX, "bsssplit/zone max");
 
 	err = endian_check();
 	if (err) {

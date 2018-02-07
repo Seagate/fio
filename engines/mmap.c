@@ -33,9 +33,9 @@ static int fio_mmap_file(struct thread_data *td, struct fio_file *f,
 	struct fio_mmap_data *fmd = FILE_ENG_DATA(f);
 	int flags = 0;
 
-	if (td_rw(td))
+	if (td_rw(td) && !td->o.verify_only)
 		flags = PROT_READ | PROT_WRITE;
-	else if (td_write(td)) {
+	else if (td_write(td) && !td->o.verify_only) {
 		flags = PROT_WRITE;
 
 		if (td->o.verify != VERIFY_NONE)
@@ -137,7 +137,7 @@ static int fio_mmapio_prep(struct thread_data *td, struct io_u *io_u)
 	 * It fits within existing mapping, use it
 	 */
 	if (io_u->offset >= fmd->mmap_off &&
-	    io_u->offset + io_u->buflen < fmd->mmap_off + fmd->mmap_sz)
+	    io_u->offset + io_u->buflen <= fmd->mmap_off + fmd->mmap_sz)
 		goto done;
 
 	/*

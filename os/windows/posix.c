@@ -25,8 +25,8 @@
 #include "../os-windows.h"
 #include "../../lib/hweight.h"
 
-extern unsigned long mtime_since_now(struct timeval *);
-extern void fio_gettime(struct timeval *, void *);
+extern unsigned long mtime_since_now(struct timespec *);
+extern void fio_gettime(struct timespec *, void *);
 
 /* These aren't defined in the MinGW headers */
 HRESULT WINAPI StringCchCopyA(
@@ -228,12 +228,14 @@ void Time_tToSystemTime(time_t dosTime, SYSTEMTIME *systemTime)
 {
     FILETIME utcFT;
     LONGLONG jan1970;
+	SYSTEMTIME tempSystemTime;
 
     jan1970 = Int32x32To64(dosTime, 10000000) + 116444736000000000;
     utcFT.dwLowDateTime = (DWORD)jan1970;
     utcFT.dwHighDateTime = jan1970 >> 32;
 
-    FileTimeToSystemTime((FILETIME*)&utcFT, systemTime);
+    FileTimeToSystemTime((FILETIME*)&utcFT, &tempSystemTime);
+	SystemTimeToTzSpecificLocalTime(NULL, &tempSystemTime, systemTime);
 }
 
 char* ctime_r(const time_t *t, char *buf)
@@ -584,7 +586,8 @@ char *basename(char *path)
 	while (path[i] != '\\' && path[i] != '/' && i >= 0)
 		i--;
 
-	strncpy(name, path + i + 1, MAX_PATH);
+	name[MAX_PATH - 1] = '\0';
+	strncpy(name, path + i + 1, MAX_PATH - 1);
 
 	return name;
 }
@@ -852,7 +855,7 @@ int poll(struct pollfd fds[], nfds_t nfds, int timeout)
 
 int nanosleep(const struct timespec *rqtp, struct timespec *rmtp)
 {
-	struct timeval tv;
+	struct timespec tv;
 	DWORD ms_remaining;
 	DWORD ms_total = (rqtp->tv_sec * 1000) + (rqtp->tv_nsec / 1000000.0);
 

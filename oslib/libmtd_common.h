@@ -13,7 +13,7 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
- * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  */
 
 /* Imported from mtd-utils by dehrenberg */
@@ -118,57 +118,6 @@ extern "C" {
 #define warnmsg(fmt, ...) do {                                                \
 	fprintf(stderr, "%s: warning!: " fmt "\n", PROGRAM_NAME, ##__VA_ARGS__); \
 } while(0)
-
-#if defined(__UCLIBC__)
-/* uClibc versions before 0.9.34 don't have rpmatch() */
-#if __UCLIBC_MAJOR__ == 0 && \
-		(__UCLIBC_MINOR__ < 9 || \
-		(__UCLIBC_MINOR__ == 9 && __UCLIBC_SUBLEVEL__ < 34))
-#undef rpmatch
-#define rpmatch __rpmatch
-static inline int __rpmatch(const char *resp)
-{
-    return (resp[0] == 'y' || resp[0] == 'Y') ? 1 :
-	(resp[0] == 'n' || resp[0] == 'N') ? 0 : -1;
-}
-#endif
-#endif
-
-/**
- * prompt the user for confirmation
- */
-static inline bool prompt(const char *msg, bool def)
-{
-	char *line = NULL;
-	size_t len;
-	bool ret = def;
-
-	do {
-		normsg_cont("%s (%c/%c) ", msg, def ? 'Y' : 'y', def ? 'n' : 'N');
-		fflush(stdout);
-
-		while (getline(&line, &len, stdin) == -1) {
-			printf("failed to read prompt; assuming '%s'\n",
-				def ? "yes" : "no");
-			break;
-		}
-
-		if (strcmp("\n", line) != 0) {
-			switch (rpmatch(line)) {
-			case 0: ret = false; break;
-			case 1: ret = true; break;
-			case -1:
-				puts("unknown response; please try again");
-				continue;
-			}
-		}
-		break;
-	} while (1);
-
-	free(line);
-
-	return ret;
-}
 
 static inline int is_power_of_2(unsigned long long n)
 {

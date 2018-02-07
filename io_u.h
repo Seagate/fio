@@ -32,8 +32,8 @@ enum {
  */
 struct io_u {
 	unsigned int priorityBit;
-	struct timeval start_time;
-	struct timeval issue_time;
+	struct timespec start_time;
+	struct timespec issue_time;
 
 	struct fio_file *file;
 	unsigned int flags;
@@ -153,12 +153,17 @@ static inline void dprint_io_u(struct io_u *io_u, const char *p)
 {
 	struct fio_file *f = io_u->file;
 
-	dprint(FD_IO, "%s: io_u %p: off=%llu/len=%lu/ddir=%d", p, io_u,
-					(unsigned long long) io_u->offset,
-					io_u->buflen, io_u->ddir);
 	if (f)
-		dprint(FD_IO, "/%s", f->file_name);
-	dprint(FD_IO, "\n");
+		dprint(FD_IO, "%s: io_u %p: off=0x%llx,len=0x%lx,ddir=%d,file=%s\n",
+				p, io_u,
+				(unsigned long long) io_u->offset,
+				io_u->buflen, io_u->ddir,
+				f->file_name);
+	else
+		dprint(FD_IO, "%s: io_u %p: off=0x%llx,len=0x%lx,ddir=%d\n",
+				p, io_u,
+				(unsigned long long) io_u->offset,
+				io_u->buflen, io_u->ddir);
 }
 #else
 #define dprint_io_u(io_u, p)

@@ -18,7 +18,7 @@
  *
  *  You should have received a copy of the GNU General Public License
  *  along with this program; if not, write to the Free Software
- *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+ *  Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
  */
 #include <locale.h>
@@ -1243,7 +1243,7 @@ static void about_dialog(GtkWidget *w, gpointer data)
 		"website", "http://git.kernel.dk/cgit/fio/",
 		"authors", authors,
 		"version", fio_version_string,
-		"copyright", "© 2012 Jens Axboe <axboe@kernel.dk>",
+		"copyright", "© 2012-2017 Jens Axboe <axboe@kernel.dk>",
 		"logo-icon-name", "fio",
 		/* Must be last: */
 		"wrap-license", TRUE,

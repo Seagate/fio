@@ -252,9 +252,10 @@ static int fio_send_data(int sk, const void *p, unsigned int len)
 	return fio_sendv_data(sk, &iov, 1);
 }
 
-static int fio_recv_data(int sk, void *p, unsigned int len, bool wait)
+static int fio_recv_data(int sk, void *buf, unsigned int len, bool wait)
 {
 	int flags;
+	char *p = buf;
 
 	if (wait)
 		flags = MSG_WAITALL;
@@ -377,7 +378,7 @@ struct fio_net_cmd *fio_net_recv_cmd(int sk, bool wait)
 			break;
 
 		/* There's payload, get it */
-		pdu = (void *) cmdret->payload + pdu_offset;
+		pdu = (char *) cmdret->payload + pdu_offset;
 		ret = fio_recv_data(sk, pdu, cmd.pdu_len, wait);
 		if (ret)
 			break;
@@ -438,7 +439,7 @@ static uint64_t alloc_reply(uint64_t tag, uint16_t opcode)
 
 	reply = calloc(1, sizeof(*reply));
 	INIT_FLIST_HEAD(&reply->list);
-	fio_gettime(&reply->tv, NULL);
+	fio_gettime(&reply->ts, NULL);
 	reply->saved_tag = tag;
 	reply->opcode = opcode;
 
@@ -615,7 +616,7 @@ static int fio_net_queue_quit(void)
 {
 	dprint(FD_NET, "server: sending quit\n");
 
-	return fio_net_queue_cmd(FIO_NET_CMD_QUIT, NULL, 0, NULL, SK_F_SIMPLE);
+	return fio_net_queue_cmd(FIO_NET_CMD_QUIT, NULL, 0, NULL, SK_F_SIMPLE | SK_F_INLINE);
 }
 
 int fio_net_send_quit(int sk)
@@ -635,7 +636,7 @@ static int fio_net_send_ack(struct fio_net_cmd *cmd, int error, int signal)
 
 	epdu.error = __cpu_to_le32(error);
 	epdu.signal = __cpu_to_le32(signal);
-	return fio_net_queue_cmd(FIO_NET_CMD_STOP, &epdu, sizeof(epdu), &tag, SK_F_COPY);
+	return fio_net_queue_cmd(FIO_NET_CMD_STOP, &epdu, sizeof(epdu), &tag, SK_F_COPY | SK_F_INLINE);
 }
 
 static int fio_net_queue_stop(int error, int signal)
@@ -843,24 +844,23 @@ static int handle_jobline_cmd(struct fio_net_cmd *cmd)
 static int handle_probe_cmd(struct fio_net_cmd *cmd)
 {
 	struct cmd_client_probe_pdu *pdu = (struct cmd_client_probe_pdu *) cmd->payload;
-	struct cmd_probe_reply_pdu probe;
 	uint64_t tag = cmd->tag;
+	struct cmd_probe_reply_pdu probe = {
+#ifdef CONFIG_BIG_ENDIAN
+		.bigendian	= 1,
+#endif
+		.os		= FIO_OS,
+		.arch		= FIO_ARCH,
+		.bpp		= sizeof(void *),
+		.cpus		= __cpu_to_le32(cpus_online()),
+	};
 
 	dprint(FD_NET, "server: sending probe reply\n");
 
 	strcpy(me, (char *) pdu->server);
 
-	memset(&probe, 0, sizeof(probe));
 	gethostname((char *) probe.hostname, sizeof(probe.hostname));
-#ifdef CONFIG_BIG_ENDIAN
-	probe.bigendian = 1;
-#endif
-	strncpy((char *) probe.fio_version, fio_version_string, sizeof(probe.fio_version));
-
-	probe.os	= FIO_OS;
-	probe.arch	= FIO_ARCH;
-	probe.bpp	= sizeof(void *);
-	probe.cpus	= __cpu_to_le32(cpus_online());
+	strncpy((char *) probe.fio_version, fio_version_string, sizeof(probe.fio_version) - 1);
 
 	/*
 	 * If the client supports compression and we do too, then enable it
@@ -950,7 +950,7 @@ static int handle_update_job_cmd(struct fio_net_cmd *cmd)
 	return 0;
 }
 
-static int handle_trigger_cmd(struct fio_net_cmd *cmd)
+static int handle_trigger_cmd(struct fio_net_cmd *cmd, struct flist_head *job_list)
 {
 	struct cmd_vtrigger_pdu *pdu = (struct cmd_vtrigger_pdu *) cmd->payload;
 	char *buf = (char *) pdu->cmd;
@@ -969,6 +969,8 @@ static int handle_trigger_cmd(struct fio_net_cmd *cmd)
 	} else
 		fio_net_queue_cmd(FIO_NET_CMD_VTRIGGER, rep, sz, NULL, SK_F_FREE | SK_F_INLINE);
 
+	fio_terminate_threads(TERMINATE_ALL);
+	fio_server_check_jobs(job_list);
 	exec_trigger(buf);
 	return 0;
 }
@@ -1012,7 +1014,7 @@ static int handle_command(struct sk_out *sk_out, struct flist_head *job_list,
 		ret = handle_update_job_cmd(cmd);
 		break;
 	case FIO_NET_CMD_VTRIGGER:
-		ret = handle_trigger_cmd(cmd);
+		ret = handle_trigger_cmd(cmd, job_list);
 		break;
 	case FIO_NET_CMD_SENDFILE: {
 		struct cmd_sendfile_reply *in;
@@ -1279,7 +1281,7 @@ static int get_my_addr_str(int sk)
 
 	ret = getsockname(sk, sockaddr_p, &len);
 	if (ret) {
-		log_err("fio: getsockaddr: %s\n", strerror(errno));
+		log_err("fio: getsockname: %s\n", strerror(errno));
 		return -1;
 	}
 
@@ -1441,6 +1443,7 @@ static void convert_gs(struct group_run_stats *dst, struct group_run_stats *src)
 	dst->unit_base	= cpu_to_le32(src->unit_base);
 	dst->groupid	= cpu_to_le32(src->groupid);
 	dst->unified_rw_rep	= cpu_to_le32(src->unified_rw_rep);
+	dst->sig_figs	= cpu_to_le32(src->sig_figs);
 }
 
 /*
@@ -1474,6 +1477,7 @@ void fio_server_send_ts(struct thread_stat *ts, struct group_run_stats *rs)
 		convert_io_stat(&p.ts.slat_stat[i], &ts->slat_stat[i]);
 		convert_io_stat(&p.ts.lat_stat[i], &ts->lat_stat[i]);
 		convert_io_stat(&p.ts.bw_stat[i], &ts->bw_stat[i]);
+		convert_io_stat(&p.ts.iops_stat[i], &ts->iops_stat[i]);
 	}
 
 	p.ts.usr_time		= cpu_to_le64(ts->usr_time);
@@ -1481,7 +1485,8 @@ void fio_server_send_ts(struct thread_stat *ts, struct group_run_stats *rs)
 	p.ts.ctx		= cpu_to_le64(ts->ctx);
 	p.ts.minf		= cpu_to_le64(ts->minf);
 	p.ts.majf		= cpu_to_le64(ts->majf);
-	p.ts.clat_percentiles	= cpu_to_le64(ts->clat_percentiles);
+	p.ts.clat_percentiles	= cpu_to_le32(ts->clat_percentiles);
+	p.ts.lat_percentiles	= cpu_to_le32(ts->lat_percentiles);
 	p.ts.percentile_precision = cpu_to_le64(ts->percentile_precision);
 
 	for (i = 0; i < FIO_IO_U_LIST_MAX_LEN; i++) {
@@ -1497,6 +1502,8 @@ void fio_server_send_ts(struct thread_stat *ts, struct group_run_stats *rs)
 		p.ts.io_u_complete[i]	= cpu_to_le32(ts->io_u_complete[i]);
 	}
 
+	for (i = 0; i < FIO_IO_U_LAT_N_NR; i++)
+		p.ts.io_u_lat_n[i]	= cpu_to_le32(ts->io_u_lat_n[i]);
 	for (i = 0; i < FIO_IO_U_LAT_U_NR; i++)
 		p.ts.io_u_lat_u[i]	= cpu_to_le32(ts->io_u_lat_u[i]);
 	for (i = 0; i < FIO_IO_U_LAT_M_NR; i++)
@@ -1532,6 +1539,8 @@ void fio_server_send_ts(struct thread_stat *ts, struct group_run_stats *rs)
 	p.ts.latency_window	= cpu_to_le64(ts->latency_window);
 	p.ts.latency_percentile.u.i = cpu_to_le64(fio_double_to_uint64(ts->latency_percentile.u.f));
 
+	p.ts.sig_figs		= cpu_to_le32(ts->sig_figs);
+
 	p.ts.nr_block_infos	= cpu_to_le64(ts->nr_block_infos);
 	for (i = 0; i < p.ts.nr_block_infos; i++)
 		p.ts.block_infos[i] = cpu_to_le32(ts->block_infos[i]);
@@ -1547,7 +1556,7 @@ void fio_server_send_ts(struct thread_stat *ts, struct group_run_stats *rs)
 	convert_gs(&p.rs, rs);
 
 	dprint(FD_NET, "ts->ss_state = %d\n", ts->ss_state);
-	if (ts->ss_state & __FIO_SS_DATA) {
+	if (ts->ss_state & FIO_SS_DATA) {
 		dprint(FD_NET, "server sending steadystate ring buffers\n");
 
 		ss_buf = malloc(sizeof(p) + 2*ts->ss_dur*sizeof(uint64_t));
@@ -1817,13 +1826,12 @@ static int __fio_append_iolog_gz(struct sk_entry *first, struct io_log *log,
 
 static int fio_append_iolog_gz(struct sk_entry *first, struct io_log *log)
 {
+	z_stream stream = {
+		.zalloc	= Z_NULL,
+		.zfree	= Z_NULL,
+		.opaque	= Z_NULL,
+	};
 	int ret = 0;
-	z_stream stream;
-
-	memset(&stream, 0, sizeof(stream));
-	stream.zalloc = Z_NULL;
-	stream.zfree = Z_NULL;
-	stream.opaque = Z_NULL;
 
 	if (deflateInit(&stream, Z_DEFAULT_COMPRESSION) != Z_OK)
 		return 1;
@@ -1919,15 +1927,15 @@ static int fio_append_text_log(struct sk_entry *first, struct io_log *log)
 
 int fio_send_iolog(struct thread_data *td, struct io_log *log, const char *name)
 {
-	struct cmd_iolog_pdu pdu;
+	struct cmd_iolog_pdu pdu = {
+		.nr_samples		= cpu_to_le64(iolog_nr_samples(log)),
+		.thread_number		= cpu_to_le32(td->thread_number),
+		.log_type		= cpu_to_le32(log->log_type),
+		.log_hist_coarseness	= cpu_to_le32(log->hist_coarseness),
+	};
 	struct sk_entry *first;
 	struct flist_head *entry;
 	int ret = 0;
-
-	pdu.nr_samples = cpu_to_le64(iolog_nr_samples(log));
-	pdu.thread_number = cpu_to_le32(td->thread_number);
-	pdu.log_type = cpu_to_le32(log->log_type);
-	pdu.log_hist_coarseness = cpu_to_le32(log->hist_coarseness);
 
 	if (!flist_empty(&log->chunk_list))
 		pdu.compressed = __cpu_to_le32(STORE_COMPRESSED);
@@ -1989,11 +1997,11 @@ int fio_send_iolog(struct thread_data *td, struct io_log *log, const char *name)
 
 void fio_server_send_add_job(struct thread_data *td)
 {
-	struct cmd_add_job_pdu pdu;
+	struct cmd_add_job_pdu pdu = {
+		.thread_number = cpu_to_le32(td->thread_number),
+		.groupid = cpu_to_le32(td->groupid),
+	};
 
-	memset(&pdu, 0, sizeof(pdu));
-	pdu.thread_number = cpu_to_le32(td->thread_number);
-	pdu.groupid = cpu_to_le32(td->groupid);
 	convert_thread_options_to_net(&pdu.top, &td->o);
 
 	fio_net_queue_cmd(FIO_NET_CMD_ADD_JOB, &pdu, sizeof(pdu), NULL,
@@ -2231,11 +2239,10 @@ int fio_server_parse_host(const char *host, int ipv6, struct in_addr *inp,
 		ret = inet_pton(AF_INET, host, inp);
 
 	if (ret != 1) {
-		struct addrinfo hints, *res;
-
-		memset(&hints, 0, sizeof(hints));
-		hints.ai_family = ipv6 ? AF_INET6 : AF_INET;
-		hints.ai_socktype = SOCK_STREAM;
+		struct addrinfo *res, hints = {
+			.ai_family = ipv6 ? AF_INET6 : AF_INET,
+			.ai_socktype = SOCK_STREAM,
+		};
 
 		ret = getaddrinfo(host, NULL, &hints, &res);
 		if (ret) {
@@ -2268,7 +2275,7 @@ int fio_server_parse_host(const char *host, int ipv6, struct in_addr *inp,
  * For local domain sockets:
  *	*ptr is the filename, *is_sock is 1.
  */
-int fio_server_parse_string(const char *str, char **ptr, int *is_sock,
+int fio_server_parse_string(const char *str, char **ptr, bool *is_sock,
 			    int *port, struct in_addr *inp,
 			    struct in6_addr *inp6, int *ipv6)
 {
@@ -2277,13 +2284,13 @@ int fio_server_parse_string(const char *str, char **ptr, int *is_sock,
 	int lport = 0;
 
 	*ptr = NULL;
-	*is_sock = 0;
+	*is_sock = false;
 	*port = fio_net_port;
 	*ipv6 = 0;
 
 	if (!strncmp(str, "sock:", 5)) {
 		*ptr = strdup(str + 5);
-		*is_sock = 1;
+		*is_sock = true;
 
 		return 0;
 	}
@@ -2362,7 +2369,8 @@ int fio_server_parse_string(const char *str, char **ptr, int *is_sock,
 static int fio_handle_server_arg(void)
 {
 	int port = fio_net_port;
-	int is_sock, ret = 0;
+	bool is_sock;
+	int ret = 0;
 
 	saddr_in.sin_addr.s_addr = htonl(INADDR_ANY);
 
@@ -2393,11 +2401,11 @@ static void sig_int(int sig)
 
 static void set_sig_handlers(void)
 {
-	struct sigaction act;
+	struct sigaction act = {
+		.sa_handler = sig_int,
+		.sa_flags = SA_RESTART,
+	};
 
-	memset(&act, 0, sizeof(act));
-	act.sa_handler = sig_int;
-	act.sa_flags = SA_RESTART;
 	sigaction(SIGINT, &act, NULL);
 }
 
