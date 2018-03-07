@@ -323,6 +323,10 @@ struct thread_options {
 
 	unsigned int allow_create;
 	unsigned int allow_mounted_write;
+
+#ifdef CONFIG_LINUX_BLKZONED
+	unsigned int read_beyond_wp;
+#endif
 };
 
 #define FIO_TOP_STR_MAX		256

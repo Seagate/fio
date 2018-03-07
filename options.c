@@ -3239,6 +3239,8 @@ struct fio_option fio_options[FIO_MAX_OPTS] = {
 		.help	= "Your platform does not support IO scheduler switching",
 	},
 #endif
+
+	/* Parameters for zones defined in the fio job */
 	{
 		.name	= "zonesize",
 		.lname	= "Zone size",
@@ -3272,6 +3274,21 @@ struct fio_option fio_options[FIO_MAX_OPTS] = {
 		.category = FIO_OPT_C_IO,
 		.group	= FIO_OPT_G_ZONE,
 	},
+
+#ifdef CONFIG_LINUX_BLKZONED
+	/* Parameters for zoned block devices */
+	{
+		.name	= "read_beyond_wp",
+		.lname	= "Allow reads beyond the zone write pointer",
+		.type	= FIO_OPT_BOOL,
+		.off1	= offsetof(struct thread_options, read_beyond_wp),
+		.help	= "Allow reads beyond the zone write pointer",
+		.def	= "0",
+		.category = FIO_OPT_C_IO,
+		.group	= FIO_OPT_G_INVALID,
+	},
+#endif
+
 	{
 		.name	= "lockmem",
 		.lname	= "Lock memory",

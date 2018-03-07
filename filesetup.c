@@ -14,6 +14,7 @@
 #include "hash.h"
 #include "lib/axmap.h"
 #include "rwlock.h"
+#include "zbd.h"
 
 #ifdef CONFIG_LINUX_FALLOCATE
 #include <linux/falloc.h>
@@ -1160,7 +1161,9 @@ done:
 		td->done = 1;
 
 	td_restore_runstate(td, old_state);
-	return 0;
+
+	return zbd_init(td);
+
 err_offset:
 	log_err("%s: you need to specify valid offset=\n", o->name);
 err_out:
@@ -1347,6 +1350,8 @@ void close_and_free_files(struct thread_data *td)
 			dprint(FD_FILE, "free unlink %s\n", f->file_name);
 			td_io_unlink_file(td, f);
 		}
+
+		zbd_free_zone_info(f);
 
 		if (use_free)
 			free(f->file_name);
@@ -1866,6 +1871,8 @@ void fio_file_reset(struct thread_data *td, struct fio_file *f)
 		axmap_reset(f->io_axmap);
 	else if (fio_file_lfsr(f))
 		lfsr_reset(&f->lfsr, td->rand_seeds[FIO_RAND_BLOCK_OFF]);
+
+	zbd_file_reset(td, f);
 }
 
 bool fio_files_done(struct thread_data *td)
