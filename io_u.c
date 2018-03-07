@@ -10,6 +10,7 @@
 #include "err.h"
 #include "lib/pow2.h"
 #include "minmax.h"
+#include "zbc.h"
 
 struct io_completion_data {
 	int nr;				/* input */
@@ -864,6 +865,7 @@ static void __fill_io_u_zone(struct thread_data *td, struct io_u *io_u)
 static int fill_io_u(struct thread_data *td, struct io_u *io_u)
 {
 	bool is_random;
+	enum io_u_action ret;
 
 	if (td_ioengine_flagged(td, FIO_NOIO))
 		goto out;
@@ -897,6 +899,10 @@ static int fill_io_u(struct thread_data *td, struct io_u *io_u)
 		dprint(FD_IO, "io_u %p, failed getting buflen\n", io_u);
 		return 1;
 	}
+
+	ret = zbc_adjust_block(td, io_u);
+	if (ret == io_u_eof)
+		return 1;
 
 	if (io_u->offset + io_u->buflen > io_u->file->real_file_size) {
 		dprint(FD_IO, "io_u %p, off=0x%llx + len=0x%lx exceeds file size=0x%llx\n",
@@ -1310,6 +1316,11 @@ static long set_io_u_file(struct thread_data *td, struct io_u *io_u)
 
 		if (!fill_io_u(td, io_u))
 			break;
+
+		if (io_u->post_submit) {
+			io_u->post_submit(io_u, FIO_Q_BUSY);
+			io_u->post_submit = NULL;
+		}
 
 		put_file_log(td, f);
 		td_io_close_file(td, f);
@@ -2184,7 +2195,7 @@ int do_io_u_sync(const struct thread_data *td, struct io_u *io_u)
 	return ret;
 }
 
-int do_io_u_trim(const struct thread_data *td, struct io_u *io_u)
+int do_io_u_trim(struct thread_data *td, struct io_u *io_u)
 {
 #ifndef FIO_HAVE_TRIM
 	io_u->error = EINVAL;
@@ -2192,6 +2203,9 @@ int do_io_u_trim(const struct thread_data *td, struct io_u *io_u)
 #else
 	struct fio_file *f = io_u->file;
 	int ret;
+
+	if (zbc_do_trim(td, io_u) == 0)
+		return io_u->xfer_buflen;
 
 	ret = os_trim(f, io_u->offset, io_u->xfer_buflen);
 	if (!ret)
