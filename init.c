@@ -2256,6 +2256,10 @@ const struct debug_level debug_levels[] = {
 	  .help = "Helper thread logging",
 	  .shift = FD_HELPERTHREAD,
 	},
+	{ .name = "zbd",
+	  .help = "Zoned Block Device logging",
+	  .shift = FD_ZBD,
+	},
 	{ .name = NULL, },
 };
 
