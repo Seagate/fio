@@ -18,7 +18,7 @@ elif test -d .git -o -f .git &&
 	fio-[0-9]*)
 		git update-index -q --refresh
 		test -z "`git diff-index --name-only HEAD --`" ||
-		VN="$VN-sea-dirty" ;;
+		VN="$VN-dirty" ;;
 	esac
 then
 	VN=$VN-sea
