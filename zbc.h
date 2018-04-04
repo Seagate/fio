@@ -51,11 +51,14 @@ struct fio_zone_info {
  * zoned_block_device_info - zoned block device characteristics
  * @mutex: Protects the modifiable members in this structure
  * @zone_size: size of a single zone in units of 512 bytes
+ * @sectors_with_data: total size of data in all zones in units of 512 bytes
  * @zone_size_log2: log2 of the zone size in bytes if it is a power of 2 or 0
  *		if the zone size is not a power of 2.
  * @nr_zones: number of zones
  * @refcount: number of fio files that share this structure
  * @num_open_zones: number of open zones
+ * @write_cnt: Number of writes since the latest zone reset triggered by
+ *	       the zone_reset_frequency fio job parameter.
  * @open_zones: zone numbers of open zones
  * @zone_info: description of the individual zones
  *
@@ -66,10 +69,12 @@ struct fio_zone_info {
 struct zoned_block_device_info {
 	pthread_mutex_t		mutex;
 	uint64_t		zone_size;
+	uint64_t		sectors_with_data;
 	uint32_t		zone_size_log2;
 	uint32_t		nr_zones;
 	uint32_t		refcount;
 	uint32_t		num_open_zones;
+	uint32_t		write_cnt;
 	uint32_t		open_zones[FIO_MAX_OPEN_ZBC_ZONES];
 	struct fio_zone_info	zone_info[0];
 };

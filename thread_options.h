@@ -326,6 +326,8 @@ struct thread_options {
 #ifdef CONFIG_LINUX_BLKZONED
 	unsigned int read_beyond_wp;
 	int max_open_zones;
+	fio_fp64_t zrt;
+	fio_fp64_t zrf;
 #endif
 };
 
