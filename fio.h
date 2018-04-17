@@ -166,6 +166,8 @@ struct zone_split_index {
 	uint64_t size_prev;
 };
 
+#define FIO_MAX_OPEN_ZBC_ZONES 128
+
 /*
  * This describes a single thread/process executing a fio job.
  */
