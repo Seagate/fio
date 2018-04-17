@@ -319,6 +319,10 @@ enum fio_q_status td_io_queue(struct thread_data *td, struct io_u *io_u)
 	}
 
 	ret = td->io_ops->queue(td, io_u);
+	if (io_u->post_submit) {
+		io_u->post_submit(io_u, ret);
+		io_u->post_submit = NULL;
+	}
 
 	unlock_file(td, io_u->file);
 

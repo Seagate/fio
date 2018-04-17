@@ -15,6 +15,8 @@
 #include <guasi.h>
 #endif
 
+enum fio_q_status;
+
 enum {
 	IO_U_F_FREE		= 1 << 0,
 	IO_U_F_FLIGHT		= 1 << 1,
@@ -91,6 +93,12 @@ struct io_u {
 		struct flist_head verify_list;
 		struct workqueue_work work;
 	};
+
+	/*
+	 * Post-submit callback. Used by the ZBC code.
+	 */
+	void (*post_submit)(const struct io_u *,
+			    enum fio_q_status submit_result);
 
 	/*
 	 * Callback for io completion
