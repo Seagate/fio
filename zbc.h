@@ -74,6 +74,7 @@ void zbc_file_reset(struct thread_data *td, struct fio_file *f);
 enum io_u_action zbc_adjust_block(struct thread_data *td, struct io_u *io_u);
 int zbc_do_trim(struct thread_data *td, const struct io_u *io_u);
 void zbc_update_wp(struct thread_data *td, const struct io_u *io_u);
+char *zbc_write_status(const struct group_run_stats *rs);
 #else
 static inline void zbc_free_zone_info(struct fio_file *f)
 {
@@ -102,6 +103,11 @@ static inline int zbc_do_trim(struct thread_data *td, const struct io_u *io_u)
 static inline void zbc_update_wp(struct thread_data *td,
 				 const struct io_u *io_u)
 {
+}
+
+static inline char *zbc_write_status(const struct group_run_stats *rs)
+{
+	return NULL;
 }
 #endif
 
