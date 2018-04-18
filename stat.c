@@ -14,6 +14,7 @@
 #include "lib/output_buffer.h"
 #include "helper_thread.h"
 #include "smalloc.h"
+#include "zbc.h"
 
 #define LOG_MSEC_SLACK	1
 
@@ -419,7 +420,7 @@ static void show_ddir_status(struct group_run_stats *rs, struct thread_stat *ts,
 	unsigned long runt;
 	unsigned long long min, max, bw, iops;
 	double mean, dev;
-	char *io_p, *bw_p, *bw_p_alt, *iops_p;
+	char *io_p, *bw_p, *bw_p_alt, *iops_p, *zbc_w_st = NULL;
 	int i2p;
 
 	if (ddir_sync(ddir)) {
@@ -450,12 +451,16 @@ static void show_ddir_status(struct group_run_stats *rs, struct thread_stat *ts,
 
 	iops = (1000 * (uint64_t)ts->total_io_u[ddir]) / runt;
 	iops_p = num2str(iops, ts->sig_figs, 1, 0, N2S_NONE);
+	if (ddir == DDIR_WRITE)
+		zbc_w_st = zbc_write_status(rs);
 
-	log_buf(out, "  %s: IOPS=%s, BW=%s (%s)(%s/%llumsec)\n",
+	log_buf(out, "  %s: IOPS=%s, BW=%s (%s)(%s/%llumsec)%s\n",
 			rs->unified_rw_rep ? "mixed" : str[ddir],
 			iops_p, bw_p, bw_p_alt, io_p,
-			(unsigned long long) ts->runtime[ddir]);
+			(unsigned long long) ts->runtime[ddir],
+			zbc_w_st ? : "");
 
+	free(zbc_w_st);
 	free(io_p);
 	free(bw_p);
 	free(bw_p_alt);
@@ -1783,6 +1788,7 @@ void __show_run_stats(void)
 			ts->block_infos[k] = td->ts.block_infos[k];
 
 		sum_thread_stats(ts, &td->ts, idx == 1);
+		ts->nr_zone_resets += td->ts.nr_zone_resets;
 
 		if (td->o.ss_dur) {
 			ts->ss_state = td->ss.state;
@@ -1810,6 +1816,7 @@ void __show_run_stats(void)
 		rs->unit_base = ts->unit_base;
 		rs->sig_figs = ts->sig_figs;
 		rs->unified_rw_rep += ts->unified_rw_rep;
+		rs->nr_zone_resets += ts->nr_zone_resets;
 
 		for (j = 0; j < DDIR_RWDIR_CNT; j++) {
 			if (!ts->runtime[j])

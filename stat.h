@@ -14,6 +14,7 @@ struct group_run_stats {
 	uint32_t sig_figs;
 	uint32_t groupid;
 	uint32_t unified_rw_rep;
+	uint64_t nr_zone_resets;
 } __attribute__((packed));
 
 /*
@@ -210,6 +211,9 @@ struct thread_stat {
 	};
 	uint32_t first_error;
 	uint64_t total_err_count;
+
+	/* ZBC stats */
+	uint64_t nr_zone_resets;
 
 	uint64_t nr_block_infos;
 	uint32_t block_infos[MAX_NR_BLOCK_INFOS];
