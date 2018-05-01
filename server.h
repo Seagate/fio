@@ -7,7 +7,6 @@
 #include <netinet/in.h>
 
 #include "stat.h"
-#include "os/os.h"
 #include "diskutil.h"
 
 #define FIO_NET_PORT 8765
@@ -17,10 +16,10 @@ struct sk_out {
 				 * protected by below ->lock */
 
 	int sk;			/* socket fd to talk to client */
-	struct fio_mutex lock;	/* protects ref and below list */
+	struct fio_sem lock;	/* protects ref and below list */
 	struct flist_head list;	/* list of pending transmit work */
-	struct fio_mutex wait;	/* wake backend when items added to list */
-	struct fio_mutex xmit;	/* held while sending data */
+	struct fio_sem wait;	/* wake backend when items added to list */
+	struct fio_sem xmit;	/* held while sending data */
 };
 
 /*
@@ -49,7 +48,7 @@ struct fio_net_cmd_reply {
 };
 
 enum {
-	FIO_SERVER_VER			= 70,
+	FIO_SERVER_VER			= 73,
 
 	FIO_SERVER_MAX_FRAGMENT_PDU	= 1024,
 	FIO_SERVER_MAX_CMD_MB		= 2048,
@@ -217,8 +216,6 @@ extern int fio_server_parse_host(const char *, int, struct in_addr *, struct in6
 extern const char *fio_server_op(unsigned int);
 extern void fio_server_got_signal(int);
 
-struct thread_stat;
-struct group_run_stats;
 extern void fio_server_send_ts(struct thread_stat *, struct group_run_stats *);
 extern void fio_server_send_gs(struct group_run_stats *);
 extern void fio_server_send_du(void);

@@ -10,6 +10,7 @@
 #include "flist.h"
 #include "workqueue.h"
 #include "smalloc.h"
+#include "pshared.h"
 
 enum {
 	SW_F_IDLE	= 1 << 0,
@@ -109,9 +110,9 @@ void workqueue_enqueue(struct workqueue *wq, struct workqueue_work *work)
 	flist_add_tail(&work->list, &sw->work_list);
 	sw->seq = ++wq->work_seq;
 	sw->flags &= ~SW_F_IDLE;
-	pthread_mutex_unlock(&sw->lock);
 
 	pthread_cond_signal(&sw->cond);
+	pthread_mutex_unlock(&sw->lock);
 }
 
 static void handle_list(struct submit_worker *sw, struct flist_head *list)

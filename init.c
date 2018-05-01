@@ -4,14 +4,17 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
-#include <fcntl.h>
 #include <ctype.h>
 #include <string.h>
 #include <errno.h>
 #include <sys/ipc.h>
 #include <sys/types.h>
-#include <sys/stat.h>
 #include <dlfcn.h>
+#ifdef CONFIG_VALGRIND_DEV
+#include <valgrind/drd.h>
+#else
+#define DRD_IGNORE_VAR(x) do { } while (0)
+#endif
 
 #include "fio.h"
 #ifndef FIO_NO_HAVE_SHM_H
@@ -79,6 +82,7 @@ static int prev_group_jobs;
 unsigned long fio_debug = 0;
 unsigned int fio_debug_jobno = -1;
 unsigned int *fio_debug_jobp = NULL;
+unsigned int *fio_warned = NULL;
 
 static char cmd_optstr[256];
 static bool did_arg;
@@ -309,6 +313,7 @@ static void free_shm(void)
 	if (threads) {
 		flow_exit();
 		fio_debug_jobp = NULL;
+		fio_warned = NULL;
 		free_threads_shm();
 	}
 
@@ -331,6 +336,8 @@ static void free_shm(void)
  */
 static int setup_thread_area(void)
 {
+	int i;
+
 	if (threads)
 		return 0;
 
@@ -341,7 +348,7 @@ static int setup_thread_area(void)
 	do {
 		size_t size = max_jobs * sizeof(struct thread_data);
 
-		size += sizeof(unsigned int);
+		size += 2 * sizeof(unsigned int);
 
 #ifndef CONFIG_NO_SHM
 		shm_id = shmget(0, size, IPC_CREAT | 0600);
@@ -374,8 +381,12 @@ static int setup_thread_area(void)
 #endif
 
 	memset(threads, 0, max_jobs * sizeof(struct thread_data));
+	for (i = 0; i < max_jobs; i++)
+		DRD_IGNORE_VAR(threads[i]);
 	fio_debug_jobp = (unsigned int *)(threads + max_jobs);
 	*fio_debug_jobp = -1;
+	fio_warned = fio_debug_jobp + 1;
+	*fio_warned = 0;
 
 	flow_init();
 
@@ -802,11 +813,12 @@ static int fixup_options(struct thread_data *td)
 			o->verify_interval = o->min_bs[DDIR_READ];
 
 		/*
-		 * Verify interval must be a factor or both min and max
+		 * Verify interval must be a factor of both min and max
 		 * write size
 		 */
-		if (o->verify_interval % o->min_bs[DDIR_WRITE] ||
-		    o->verify_interval % o->max_bs[DDIR_WRITE])
+		if (!o->verify_interval ||
+		    (o->min_bs[DDIR_WRITE] % o->verify_interval) ||
+		    (o->max_bs[DDIR_WRITE] % o->verify_interval))
 			o->verify_interval = gcd(o->min_bs[DDIR_WRITE],
 							o->max_bs[DDIR_WRITE]);
 	}
@@ -821,11 +833,11 @@ static int fixup_options(struct thread_data *td)
 		}
 	}
 
-	if (!o->unit_base) {
+	if (o->unit_base == N2S_NONE) {
 		if (td_ioengine_flagged(td, FIO_BIT_BASED))
-			o->unit_base = 1;
+			o->unit_base = N2S_BITPERSEC;
 		else
-			o->unit_base = 8;
+			o->unit_base = N2S_BYTEPERSEC;
 	}
 
 #ifndef FIO_HAVE_ANY_FALLOCATE
@@ -985,23 +997,26 @@ void td_fill_verify_state_seed(struct thread_data *td)
 
 static void td_fill_rand_seeds_internal(struct thread_data *td, bool use64)
 {
+	unsigned int read_seed = td->rand_seeds[FIO_RAND_BS_OFF];
+	unsigned int write_seed = td->rand_seeds[FIO_RAND_BS1_OFF];
+	unsigned int trim_seed = td->rand_seeds[FIO_RAND_BS2_OFF];
 	int i;
 
 	/*
 	 * trimwrite is special in that we need to generate the same
 	 * offsets to get the "write after trim" effect. If we are
 	 * using bssplit to set buffer length distributions, ensure that
-	 * we seed the trim and write generators identically.
+	 * we seed the trim and write generators identically. Ditto for
+	 * verify, read and writes must have the same seed, if we are doing
+	 * read verify.
 	 */
-	if (td_trimwrite(td)) {
-		init_rand_seed(&td->bsrange_state[DDIR_READ], td->rand_seeds[FIO_RAND_BS_OFF], use64);
-		init_rand_seed(&td->bsrange_state[DDIR_WRITE], td->rand_seeds[FIO_RAND_BS1_OFF], use64);
-		init_rand_seed(&td->bsrange_state[DDIR_TRIM], td->rand_seeds[FIO_RAND_BS1_OFF], use64);
-	} else {
-		init_rand_seed(&td->bsrange_state[DDIR_READ], td->rand_seeds[FIO_RAND_BS_OFF], use64);
-		init_rand_seed(&td->bsrange_state[DDIR_WRITE], td->rand_seeds[FIO_RAND_BS1_OFF], use64);
-		init_rand_seed(&td->bsrange_state[DDIR_TRIM], td->rand_seeds[FIO_RAND_BS2_OFF], use64);
-	}
+	if (td->o.verify != VERIFY_NONE)
+		write_seed = read_seed;
+	if (td_trimwrite(td))
+		trim_seed = write_seed;
+	init_rand_seed(&td->bsrange_state[DDIR_READ], read_seed, use64);
+	init_rand_seed(&td->bsrange_state[DDIR_WRITE], write_seed, use64);
+	init_rand_seed(&td->bsrange_state[DDIR_TRIM], trim_seed, use64);
 
 	td_fill_verify_state_seed(td);
 	init_rand_seed(&td->rwmix_state, td->rand_seeds[FIO_RAND_MIX_OFF], false);
@@ -1172,7 +1187,7 @@ static void init_flags(struct thread_data *td)
 	    fio_option_is_set(o, zero_buffers)))
 		td->flags |= TD_F_SCRAMBLE_BUFFERS;
 	if (o->verify != VERIFY_NONE)
-		td->flags |= TD_F_VER_NONE;
+		td->flags |= TD_F_DO_VERIFY;
 
 	if (o->verify_async || o->io_submit_mode == IO_MODE_OFFLOAD)
 		td->flags |= TD_F_NEED_LOCK;
@@ -1466,7 +1481,7 @@ static int add_job(struct thread_data *td, const char *jobname, int job_add_num,
 			f->real_file_size = -1ULL;
 	}
 
-	td->mutex = fio_mutex_init(FIO_MUTEX_LOCKED);
+	td->sem = fio_sem_init(FIO_SEM_LOCKED);
 
 	td->ts.clat_percentiles = o->clat_percentiles;
 	td->ts.lat_percentiles = o->lat_percentiles;
@@ -1960,7 +1975,8 @@ static int __parse_jobs_ini(struct thread_data *td,
 			if (p[0] == '[') {
 				if (nested) {
 					log_err("No new sections in included files\n");
-					return 1;
+					ret = 1;
+					goto out;
 				}
 
 				skip_fgets = 1;
@@ -2091,7 +2107,7 @@ static int fill_def_thread(void)
 static void show_debug_categories(void)
 {
 #ifdef FIO_INC_DEBUG
-	struct debug_level *dl = &debug_levels[0];
+	const struct debug_level *dl = &debug_levels[0];
 	int curlen, first = 1;
 
 	curlen = 0;
@@ -2181,7 +2197,7 @@ static void usage(const char *name)
 }
 
 #ifdef FIO_INC_DEBUG
-struct debug_level debug_levels[] = {
+const struct debug_level debug_levels[] = {
 	{ .name = "process",
 	  .help = "Process creation/exit logging",
 	  .shift = FD_PROCESS,
@@ -2254,12 +2270,16 @@ struct debug_level debug_levels[] = {
 	  .help = "Helper thread logging",
 	  .shift = FD_HELPERTHREAD,
 	},
+	{ .name = "zbc",
+	  .help = "Zoned Block Device logging",
+	  .shift = FD_ZBC,
+	},
 	{ .name = NULL, },
 };
 
 static int set_debug(const char *string)
 {
-	struct debug_level *dl;
+	const struct debug_level *dl;
 	char *p = (char *) string;
 	char *opt;
 	int i;

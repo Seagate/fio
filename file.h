@@ -10,6 +10,9 @@
 #include "lib/lfsr.h"
 #include "lib/gauss.h"
 
+/* Forward declarations */
+struct zoned_block_device_info;
+
 /*
  * The type of object we are working on
  */
@@ -98,6 +101,11 @@ struct fio_file {
 	uint64_t io_size;
 
 	/*
+	 * Zoned device information
+	 */
+	struct zoned_block_device_info *zbd_info;
+
+	/*
 	 * Track last end and last start of IO for a given data direction
 	 */
 	uint64_t last_pos[DDIR_RWDIR_CNT];
@@ -125,7 +133,7 @@ struct fio_file {
 	 * if io is protected by a semaphore, this is set
 	 */
 	union {
-		struct fio_mutex *lock;
+		struct fio_sem *lock;
 		struct fio_rwlock *rwlock;
 	};
 

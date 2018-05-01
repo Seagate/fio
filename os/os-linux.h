@@ -19,8 +19,14 @@
 #include <linux/fs.h>
 #include <scsi/sg.h>
 
+#ifdef ARCH_HAVE_CRC_CRYPTO
+#include <sys/auxv.h>
+#ifndef HWCAP_CRC32
+#define HWCAP_CRC32             (1 << 7)
+#endif /* HWCAP_CRC32 */
+#endif /* ARCH_HAVE_CRC_CRYPTO */
+
 #include "./os-linux-syscall.h"
-#include "binject.h"
 #include "../file.h"
 
 #ifndef __has_builtin         // Optional of course.
@@ -41,7 +47,6 @@
 #define FIO_HAVE_CGROUPS
 #define FIO_HAVE_FS_STAT
 #define FIO_HAVE_TRIM
-#define FIO_HAVE_BINJECT
 #define FIO_HAVE_GETTID
 #define FIO_USE_GENERIC_INIT_RANDOM_STATE
 #define FIO_HAVE_PWRITEV2
@@ -409,5 +414,25 @@ static inline bool fio_fallocate(struct fio_file *f, uint64_t offset,
 	return false;
 }
 #endif
+
+#define FIO_HAVE_CPU_HAS
+static inline bool os_cpu_has(cpu_features feature)
+{
+	bool have_feature;
+	unsigned long fio_unused hwcap;
+
+	switch (feature) {
+#ifdef ARCH_HAVE_CRC_CRYPTO
+	case CPU_ARM64_CRC32C:
+		hwcap = getauxval(AT_HWCAP);
+		have_feature = (hwcap & HWCAP_CRC32) != 0;
+		break;
+#endif
+	default:
+		have_feature = false;
+	}
+
+	return have_feature;
+}
 
 #endif

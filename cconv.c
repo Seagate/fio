@@ -1,5 +1,6 @@
 #include <string.h>
 
+#include "log.h"
 #include "thread_options.h"
 
 static void string_to_cpu(char **dst, const uint8_t *src)
@@ -161,8 +162,6 @@ void convert_thread_options_to_cpu(struct thread_options *o,
 	o->write_hint = le32_to_cpu(top->write_hint);
 	o->verify = le32_to_cpu(top->verify);
 	o->do_verify = le32_to_cpu(top->do_verify);
-	o->verifysort = le32_to_cpu(top->verifysort);
-	o->verifysort_nr = le32_to_cpu(top->verifysort_nr);
 	o->experimental_verify = le32_to_cpu(top->experimental_verify);
 	o->verify_state = le32_to_cpu(top->verify_state);
 	o->verify_interval = le32_to_cpu(top->verify_interval);
@@ -290,6 +289,8 @@ void convert_thread_options_to_cpu(struct thread_options *o,
 	o->block_error_hist = le32_to_cpu(top->block_error_hist);
 	o->replay_align = le32_to_cpu(top->replay_align);
 	o->replay_scale = le32_to_cpu(top->replay_scale);
+	o->replay_time_scale = le32_to_cpu(top->replay_time_scale);
+	o->replay_skip = le32_to_cpu(top->replay_skip);
 	o->per_job_logs = le32_to_cpu(top->per_job_logs);
 	o->write_bw_log = le32_to_cpu(top->write_bw_log);
 	o->write_lat_log = le32_to_cpu(top->write_lat_log);
@@ -374,8 +375,6 @@ void convert_thread_options_to_net(struct thread_options_pack *top,
 	top->write_hint = cpu_to_le32(o->write_hint);
 	top->verify = cpu_to_le32(o->verify);
 	top->do_verify = cpu_to_le32(o->do_verify);
-	top->verifysort = cpu_to_le32(o->verifysort);
-	top->verifysort_nr = cpu_to_le32(o->verifysort_nr);
 	top->experimental_verify = cpu_to_le32(o->experimental_verify);
 	top->verify_state = cpu_to_le32(o->verify_state);
 	top->verify_interval = cpu_to_le32(o->verify_interval);
@@ -480,6 +479,8 @@ void convert_thread_options_to_net(struct thread_options_pack *top,
 	top->block_error_hist = cpu_to_le32(o->block_error_hist);
 	top->replay_align = cpu_to_le32(o->replay_align);
 	top->replay_scale = cpu_to_le32(o->replay_scale);
+	top->replay_time_scale = cpu_to_le32(o->replay_time_scale);
+	top->replay_skip = cpu_to_le32(o->replay_skip);
 	top->per_job_logs = cpu_to_le32(o->per_job_logs);
 	top->write_bw_log = cpu_to_le32(o->write_bw_log);
 	top->write_lat_log = cpu_to_le32(o->write_lat_log);

@@ -7,7 +7,6 @@
  */
 #include <stdio.h>
 #include <stdlib.h>
-#include <unistd.h>
 #include <errno.h>
 #include <sys/mman.h>
 
@@ -26,6 +25,30 @@ struct fio_mmap_data {
 	size_t mmap_sz;
 	off_t mmap_off;
 };
+
+static bool fio_madvise_file(struct thread_data *td, struct fio_file *f,
+			     size_t length)
+
+{
+	struct fio_mmap_data *fmd = FILE_ENG_DATA(f);
+
+	if (!td->o.fadvise_hint)
+		return true;
+
+	if (!td_random(td)) {
+		if (posix_madvise(fmd->mmap_ptr, length, POSIX_MADV_SEQUENTIAL) < 0) {
+			td_verror(td, errno, "madvise");
+			return false;
+		}
+	} else {
+		if (posix_madvise(fmd->mmap_ptr, length, POSIX_MADV_RANDOM) < 0) {
+			td_verror(td, errno, "madvise");
+			return false;
+		}
+	}
+
+	return true;
+}
 
 static int fio_mmap_file(struct thread_data *td, struct fio_file *f,
 			 size_t length, off_t off)
@@ -50,17 +73,9 @@ static int fio_mmap_file(struct thread_data *td, struct fio_file *f,
 		goto err;
 	}
 
-	if (!td_random(td)) {
-		if (posix_madvise(fmd->mmap_ptr, length, POSIX_MADV_SEQUENTIAL) < 0) {
-			td_verror(td, errno, "madvise");
-			goto err;
-		}
-	} else {
-		if (posix_madvise(fmd->mmap_ptr, length, POSIX_MADV_RANDOM) < 0) {
-			td_verror(td, errno, "madvise");
-			goto err;
-		}
-	}
+	if (!fio_madvise_file(td, f, length))
+		goto err;
+
 	if (posix_madvise(fmd->mmap_ptr, length, POSIX_MADV_DONTNEED) < 0) {
 		td_verror(td, errno, "madvise");
 		goto err;
@@ -162,7 +177,8 @@ done:
 	return 0;
 }
 
-static int fio_mmapio_queue(struct thread_data *td, struct io_u *io_u)
+static enum fio_q_status fio_mmapio_queue(struct thread_data *td,
+					  struct io_u *io_u)
 {
 	struct fio_file *f = io_u->file;
 	struct fio_mmap_data *fmd = FILE_ENG_DATA(f);

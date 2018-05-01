@@ -5,13 +5,12 @@
 #include <stdlib.h>
 #include <mntent.h>
 #include <sys/stat.h>
-#include <sys/types.h>
 #include "fio.h"
 #include "flist.h"
 #include "cgroup.h"
 #include "smalloc.h"
 
-static struct fio_mutex *lock;
+static struct fio_sem *lock;
 
 struct cgroup_member {
 	struct flist_head list;
@@ -70,9 +69,9 @@ err:
 	}
 	if (td->o.cgroup_nodelete)
 		cm->cgroup_nodelete = 1;
-	fio_mutex_down(lock);
+	fio_sem_down(lock);
 	flist_add_tail(&cm->list, clist);
-	fio_mutex_up(lock);
+	fio_sem_up(lock);
 }
 
 void cgroup_kill(struct flist_head *clist)
@@ -83,7 +82,7 @@ void cgroup_kill(struct flist_head *clist)
 	if (!lock)
 		return;
 
-	fio_mutex_down(lock);
+	fio_sem_down(lock);
 
 	flist_for_each_safe(n, tmp, clist) {
 		cm = flist_entry(n, struct cgroup_member, list);
@@ -94,7 +93,7 @@ void cgroup_kill(struct flist_head *clist)
 		sfree(cm);
 	}
 
-	fio_mutex_up(lock);
+	fio_sem_up(lock);
 }
 
 static char *get_cgroup_root(struct thread_data *td, char *mnt)
@@ -148,6 +147,9 @@ int cgroup_setup(struct thread_data *td, struct flist_head *clist, char **mnt)
 {
 	char *root;
 
+	if (!clist)
+		return 1;
+
 	if (!*mnt) {
 		*mnt = find_cgroup_mnt(td);
 		if (!*mnt)
@@ -198,12 +200,12 @@ void cgroup_shutdown(struct thread_data *td, char **mnt)
 
 static void fio_init cgroup_init(void)
 {
-	lock = fio_mutex_init(FIO_MUTEX_UNLOCKED);
+	lock = fio_sem_init(FIO_SEM_UNLOCKED);
 	if (!lock)
 		log_err("fio: failed to allocate cgroup lock\n");
 }
 
 static void fio_exit cgroup_exit(void)
 {
-	fio_mutex_remove(lock);
+	fio_sem_remove(lock);
 }

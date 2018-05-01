@@ -672,7 +672,7 @@ Time related parameters
 	Tell fio to terminate processing after the specified period of time.  It
 	can be quite hard to determine for how long a specified job will run, so
 	this parameter is handy to cap the total runtime to a given time.  When
-	the unit is omitted, the value is intepreted in seconds.
+	the unit is omitted, the value is interpreted in seconds.
 
 .. option:: time_based
 
@@ -1093,8 +1093,9 @@ I/O type
 
 .. option:: fadvise_hint=str
 
-	Use :manpage:`posix_fadvise(2)` to advise the kernel on what I/O patterns
-	are likely to be issued.  Accepted values are:
+	Use :manpage:`posix_fadvise(2)` or :manpage:`posix_fadvise(2)` to
+	advise the kernel on what I/O patterns are likely to be issued.
+	Accepted values are:
 
 		**0**
 			Backwards-compatible hint for "no hint".
@@ -1746,6 +1747,7 @@ I/O engine
 			:manpage:`read(2)` and :manpage:`write(2)` for asynchronous
 			I/O. Requires :option:`filename` option to specify either block or
 			character devices.
+			The sg engine includes engine specific options.
 
 		**null**
 			Doesn't transfer any data, just pretends to.  This is mainly used to
@@ -1774,7 +1776,7 @@ I/O engine
 			at least one non-cpuio job.
 
 		**guasi**
-			The GUASI I/O engine is the Generic Userspace Asyncronous Syscall
+			The GUASI I/O engine is the Generic Userspace Asynchronous Syscall
 			Interface approach to async I/O. See
 
 			http://www.xmailserver.org/guasi-lib.html
@@ -1808,6 +1810,11 @@ I/O engine
 		**e4defrag**
 			I/O engine that does regular EXT4_IOC_MOVE_EXT ioctls to simulate
 			defragment activity in request to DDIR_WRITE event.
+
+		**rados**
+			I/O engine supporting direct access to Ceph Reliable Autonomic
+			Distributed Object Store (RADOS) via librados. This ioengine
+			defines engine specific options.
 
 		**rbd**
 			I/O engine supporting direct access to Ceph Rados Block Devices
@@ -1847,12 +1854,12 @@ I/O engine
 
 		**pmemblk**
 			Read and write using filesystem DAX to a file on a filesystem
-			mounted with DAX on a persistent memory device through the NVML
+			mounted with DAX on a persistent memory device through the PMDK
 			libpmemblk library.
 
 		**dev-dax**
 			Read and write using device DAX to a persistent memory device (e.g.,
-			/dev/dax0.0) through the NVML libpmem library.
+			/dev/dax0.0) through the PMDK libpmem library.
 
 		**external**
 			Prefix to specify loading an external I/O engine object file. Append
@@ -1868,7 +1875,7 @@ I/O engine
 
 		**libpmem**
 			Read and write using mmap I/O to a file on a filesystem
-			mounted with DAX on a persistent memory device through the NVML
+			mounted with DAX on a persistent memory device through the PMDK
 			libpmem library.
 
 I/O engine specific parameters
@@ -2010,7 +2017,7 @@ with the caveat that when used on the command line, they must come after the
 		Allocate space immediately inside defragment event, and free right
 		after event.
 
-.. option:: clustername=str : [rbd]
+.. option:: clustername=str : [rbd,rados]
 
 	Specifies the name of the Ceph cluster.
 
@@ -2018,16 +2025,21 @@ with the caveat that when used on the command line, they must come after the
 
 	Specifies the name of the RBD.
 
-.. option:: pool=str : [rbd]
+.. option:: pool=str : [rbd,rados]
 
-	Specifies the name of the Ceph pool containing RBD.
+	Specifies the name of the Ceph pool containing RBD or RADOS data.
 
-.. option:: clientname=str : [rbd]
+.. option:: clientname=str : [rbd,rados]
 
 	Specifies the username (without the 'client.' prefix) used to access the
 	Ceph cluster. If the *clustername* is specified, the *clientname* shall be
 	the full *type.id* string. If no type. prefix is given, fio will add
 	'client.' by default.
+
+.. option:: busy_poll=bool : [rbd,rados]
+
+        Poll store instead of waiting for completion. Usually this provides better
+        throughput at cost of higher(up to 100%) CPU utilization.
 
 .. option:: skip_bad=bool : [mtd]
 
@@ -2056,6 +2068,17 @@ with the caveat that when used on the command line, they must come after the
 	will be used in the rdma_resolve_add() function. This can be useful when
 	multiple paths exist between the client and the server or in certain loopback
 	configurations.
+
+.. option:: readfua=bool : [sg]
+
+	With readfua option set to 1, read operations include
+	the force unit access (fua) flag. Default is 0.
+
+.. option:: writefua=bool : [sg]
+
+	With writefua option set to 1, write operations include
+	the force unit access (fua) flag. Default is 0.
+
 
 I/O depth
 ~~~~~~~~~
@@ -2288,6 +2311,14 @@ I/O replay
 	still respecting ordering. The result is the same I/O pattern to a given
 	device, but different timings.
 
+.. option:: replay_time_scale=int
+
+	When replaying I/O with :option:`read_iolog`, fio will honor the
+	original timing in the trace. With this option, it's possible to scale
+	the time. It's a percentage option, if set to 50 it means run at 50%
+	the original IO rate in the trace. If set to 200, run at twice the
+	original IO rate. Defaults to 100.
+
 .. option:: replay_redirect=str
 
 	While replaying I/O patterns using :option:`read_iolog` the default behavior
@@ -2314,6 +2345,14 @@ I/O replay
 .. option:: replay_scale=int
 
 	Scale sector offsets down by this factor when replaying traces.
+
+.. option:: replay_skip=str
+
+	Sometimes it's useful to skip certain IO types in a replay trace.
+	This could be, for instance, eliminating the writes in the trace.
+	Or not replaying the trims/discards, if you are redirecting to
+	a device that doesn't support them. This option takes a comma
+	separated list of read, write, trim, sync.
 
 
 Threads, processes and job synchronization
@@ -2354,24 +2393,27 @@ Threads, processes and job synchronization
 
 	Set the I/O priority class. See man :manpage:`ionice(1)`.
 
-.. option:: cpumask=int
-
-	Set the CPU affinity of this job. The parameter given is a bit mask of
-	allowed CPUs the job may run on. So if you want the allowed CPUs to be 1
-	and 5, you would pass the decimal value of (1 << 1 | 1 << 5), or 34. See man
-	:manpage:`sched_setaffinity(2)`. This may not work on all supported
-	operating systems or kernel versions. This option doesn't work well for a
-	higher CPU count than what you can store in an integer mask, so it can only
-	control cpus 1-32. For boxes with larger CPU counts, use
-	:option:`cpus_allowed`.
-
 .. option:: cpus_allowed=str
 
 	Controls the same options as :option:`cpumask`, but accepts a textual
-	specification of the permitted CPUs instead. So to use CPUs 1 and 5 you
-	would specify ``cpus_allowed=1,5``. This option also allows a range of CPUs
-	to be specified -- say you wanted a binding to CPUs 1, 5, and 8 to 15, you
-	would set ``cpus_allowed=1,5,8-15``.
+	specification of the permitted CPUs instead and CPUs are indexed from 0. So
+	to use CPUs 0 and 5 you would specify ``cpus_allowed=0,5``. This option also
+	allows a range of CPUs to be specified -- say you wanted a binding to CPUs
+	0, 5, and 8 to 15, you would set ``cpus_allowed=0,5,8-15``.
+
+	On Windows, when ``cpus_allowed`` is unset only CPUs from fio's current
+	processor group will be used and affinity settings are inherited from the
+	system. An fio build configured to target Windows 7 makes options that set
+	CPUs processor group aware and values will set both the processor group
+	and a CPU from within that group. For example, on a system where processor
+	group 0 has 40 CPUs and processor group 1 has 32 CPUs, ``cpus_allowed``
+	values between 0 and 39 will bind CPUs from processor group 0 and
+	``cpus_allowed`` values between 40 and 71 will bind CPUs from processor
+	group 1. When using ``cpus_allowed_policy=shared`` all CPUs specified by a
+	single ``cpus_allowed`` option must be from the same processor group. For
+	Windows fio builds not built for Windows 7, CPUs will only be selected from
+	(and be relative to) whatever processor group fio happens to be running in
+	and CPUs from other processor groups cannot be used.
 
 .. option:: cpus_allowed_policy=str
 
@@ -2388,6 +2430,17 @@ Threads, processes and job synchronization
 	enough CPUs are given for the jobs listed, then fio will roundrobin the CPUs
 	in the set.
 
+.. option:: cpumask=int
+
+	Set the CPU affinity of this job. The parameter given is a bit mask of
+	allowed CPUs the job may run on. So if you want the allowed CPUs to be 1
+	and 5, you would pass the decimal value of (1 << 1 | 1 << 5), or 34. See man
+	:manpage:`sched_setaffinity(2)`. This may not work on all supported
+	operating systems or kernel versions. This option doesn't work well for a
+	higher CPU count than what you can store in an integer mask, so it can only
+	control cpus 1-32. For boxes with larger CPU counts, use
+	:option:`cpus_allowed`.
+
 .. option:: numa_cpu_nodes=str
 
 	Set this job running on specified NUMA nodes' CPUs. The arguments allow
@@ -2402,7 +2455,7 @@ Threads, processes and job synchronization
 
 		<mode>[:<nodelist>]
 
-	``mode`` is one of the following memory poicies: ``default``, ``prefer``,
+	``mode`` is one of the following memory policies: ``default``, ``prefer``,
 	``bind``, ``interleave`` or ``local``. For ``default`` and ``local`` memory
 	policies, no node needs to be specified.  For ``prefer``, only one node is
 	allowed.  For ``bind`` and ``interleave`` the ``nodelist`` may be as
@@ -2526,7 +2579,7 @@ Verification
 			each block. This will automatically use hardware acceleration
 			(e.g. SSE4.2 on an x86 or CRC crypto extensions on ARM64) but will
 			fall back to software crc32c if none is found. Generally the
-			fatest checksum fio supports when hardware accelerated.
+			fastest checksum fio supports when hardware accelerated.
 
 		**crc32c-intel**
 			Synonym for crc32c.
@@ -2589,18 +2642,6 @@ Verification
 	given is a read or random read, fio will assume that it should verify a
 	previously written file. If the data direction includes any form of write,
 	the verify will be of the newly written data.
-
-.. option:: verifysort=bool
-
-	If true, fio will sort written verify blocks when it deems it faster to read
-	them back in a sorted manner. This is often the case when overwriting an
-	existing file, since the blocks are already laid out in the file system. You
-	can ignore this option unless doing huge amounts of really fast I/O where
-	the red-black tree sorting CPU time becomes significant. Default: true.
-
-.. option:: verifysort_nr=int
-
-	Pre-load and sort verify blocks for a read workload.
 
 .. option:: verify_offset=int
 
@@ -2898,7 +2939,8 @@ Measurements and reporting
 
 	Define the set of CPUs that are allowed to handle online log compression for
 	the I/O jobs. This can provide better isolation between performance
-	sensitive jobs, and background compression work.
+	sensitive jobs, and background compression work. See
+	:option:`cpus_allowed` for the format used.
 
 .. option:: log_store_compressed=bool
 

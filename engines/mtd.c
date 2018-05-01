@@ -4,17 +4,14 @@
  * IO engine that reads/writes from MTD character devices.
  *
  */
-#include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <unistd.h>
 #include <errno.h>
 #include <sys/ioctl.h>
 #include <mtd/mtd-user.h>
 
 #include "../fio.h"
 #include "../optgroup.h"
-#include "../verify.h"
 #include "../oslib/libmtd.h"
 
 static libmtd_t desc;
@@ -74,7 +71,8 @@ static int fio_mtd_is_bad(struct thread_data *td,
 	return ret;
 }
 
-static int fio_mtd_queue(struct thread_data *td, struct io_u *io_u)
+static enum fio_q_status fio_mtd_queue(struct thread_data *td,
+				       struct io_u *io_u)
 {
 	struct fio_file *f = io_u->file;
 	struct fio_mtd_data *fmd = FILE_ENG_DATA(f);

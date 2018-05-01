@@ -1,13 +1,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
-#include <limits.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <sys/poll.h>
+#include <poll.h>
 #include <sys/types.h>
 #include <sys/stat.h>
-#include <sys/wait.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <netinet/in.h>
@@ -23,7 +21,7 @@
 #include "server.h"
 #include "flist.h"
 #include "hash.h"
-#include "verify.h"
+#include "verify-state.h"
 
 static void handle_du(struct fio_client *client, struct fio_net_cmd *cmd);
 static void handle_ts(struct fio_client *client, struct fio_net_cmd *cmd);
@@ -905,21 +903,21 @@ static void convert_ts(struct thread_stat *dst, struct thread_stat *src)
 	}
 
 	for (i = 0; i < FIO_IO_U_MAP_NR; i++) {
-		dst->io_u_map[i]	= le32_to_cpu(src->io_u_map[i]);
-		dst->io_u_submit[i]	= le32_to_cpu(src->io_u_submit[i]);
-		dst->io_u_complete[i]	= le32_to_cpu(src->io_u_complete[i]);
+		dst->io_u_map[i]	= le64_to_cpu(src->io_u_map[i]);
+		dst->io_u_submit[i]	= le64_to_cpu(src->io_u_submit[i]);
+		dst->io_u_complete[i]	= le64_to_cpu(src->io_u_complete[i]);
 	}
 
 	for (i = 0; i < FIO_IO_U_LAT_N_NR; i++)
-		dst->io_u_lat_n[i]	= le32_to_cpu(src->io_u_lat_n[i]);
+		dst->io_u_lat_n[i]	= le64_to_cpu(src->io_u_lat_n[i]);
 	for (i = 0; i < FIO_IO_U_LAT_U_NR; i++)
-		dst->io_u_lat_u[i]	= le32_to_cpu(src->io_u_lat_u[i]);
+		dst->io_u_lat_u[i]	= le64_to_cpu(src->io_u_lat_u[i]);
 	for (i = 0; i < FIO_IO_U_LAT_M_NR; i++)
-		dst->io_u_lat_m[i]	= le32_to_cpu(src->io_u_lat_m[i]);
+		dst->io_u_lat_m[i]	= le64_to_cpu(src->io_u_lat_m[i]);
 
 	for (i = 0; i < DDIR_RWDIR_CNT; i++)
 		for (j = 0; j < FIO_IO_U_PLAT_NR; j++)
-			dst->io_u_plat[i][j] = le32_to_cpu(src->io_u_plat[i][j]);
+			dst->io_u_plat[i][j] = le64_to_cpu(src->io_u_plat[i][j]);
 
 	for (i = 0; i < DDIR_RWDIR_CNT; i++) {
 		dst->total_io_u[i]	= le64_to_cpu(src->total_io_u[i]);
@@ -1283,7 +1281,7 @@ static void client_flush_hist_samples(FILE *f, int hist_coarseness, void *sample
 	int log_offset;
 	uint64_t i, j, nr_samples;
 	struct io_u_plat_entry *entry;
-	unsigned int *io_u_plat;
+	uint64_t *io_u_plat;
 
 	int stride = 1 << hist_coarseness;
 
@@ -1306,9 +1304,9 @@ static void client_flush_hist_samples(FILE *f, int hist_coarseness, void *sample
 		fprintf(f, "%lu, %u, %u, ", (unsigned long) s->time,
 						io_sample_ddir(s), s->bs);
 		for (j = 0; j < FIO_IO_U_PLAT_NR - stride; j += stride) {
-			fprintf(f, "%lu, ", hist_sum(j, stride, io_u_plat, NULL));
+			fprintf(f, "%llu, ", (unsigned long long)hist_sum(j, stride, io_u_plat, NULL));
 		}
-		fprintf(f, "%lu\n", (unsigned long)
+		fprintf(f, "%llu\n", (unsigned long long)
 			hist_sum(FIO_IO_U_PLAT_NR - stride, stride, io_u_plat, NULL));
 
 	}
@@ -1341,7 +1339,7 @@ static int fio_client_handle_iolog(struct fio_client *client,
 	sprintf(log_pathname, "%s.%s", pdu->name, client->hostname);
 
 	if (store_direct) {
-		ssize_t ret;
+		ssize_t wrote;
 		size_t sz;
 		int fd;
 
@@ -1355,10 +1353,10 @@ static int fio_client_handle_iolog(struct fio_client *client,
 		}
 
 		sz = cmd->pdu_len - sizeof(*pdu);
-		ret = write(fd, pdu->samples, sz);
+		wrote = write(fd, pdu->samples, sz);
 		close(fd);
 
-		if (ret != sz) {
+		if (wrote != sz) {
 			log_err("fio: short write on compressed log\n");
 			ret = 1;
 			goto out;

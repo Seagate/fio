@@ -9,11 +9,7 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <stdio.h>
-#include <stdlib.h>
-#include <unistd.h>
-#include <sys/uio.h>
 #include <errno.h>
-#include <assert.h>
 #include <fcntl.h>
 
 #include "../fio.h"
@@ -131,7 +127,8 @@ static void fio_e4defrag_cleanup(struct thread_data *td)
 }
 
 
-static int fio_e4defrag_queue(struct thread_data *td, struct io_u *io_u)
+static enum fio_q_status fio_e4defrag_queue(struct thread_data *td,
+					    struct io_u *io_u)
 {
 
 	int ret;

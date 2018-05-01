@@ -14,6 +14,7 @@ struct group_run_stats {
 	uint32_t sig_figs;
 	uint32_t groupid;
 	uint32_t unified_rw_rep;
+	uint64_t nr_zone_resets;
 } __attribute__((packed));
 
 /*
@@ -182,15 +183,14 @@ struct thread_stat {
 	uint64_t percentile_precision;
 	fio_fp64_t percentile_list[FIO_IO_U_LIST_MAX_LEN];
 
-	uint32_t io_u_map[FIO_IO_U_MAP_NR];
-	uint32_t io_u_submit[FIO_IO_U_MAP_NR];
-	uint32_t io_u_complete[FIO_IO_U_MAP_NR];
-	uint32_t io_u_lat_n[FIO_IO_U_LAT_N_NR];
-	uint32_t io_u_lat_u[FIO_IO_U_LAT_U_NR];
-	uint32_t io_u_lat_m[FIO_IO_U_LAT_M_NR];
-	uint32_t io_u_plat[DDIR_RWDIR_CNT][FIO_IO_U_PLAT_NR];
-	uint32_t io_u_sync_plat[FIO_IO_U_PLAT_NR];
-	uint32_t pad;
+	uint64_t io_u_map[FIO_IO_U_MAP_NR];
+	uint64_t io_u_submit[FIO_IO_U_MAP_NR];
+	uint64_t io_u_complete[FIO_IO_U_MAP_NR];
+	uint64_t io_u_lat_n[FIO_IO_U_LAT_N_NR];
+	uint64_t io_u_lat_u[FIO_IO_U_LAT_U_NR];
+	uint64_t io_u_lat_m[FIO_IO_U_LAT_M_NR];
+	uint64_t io_u_plat[DDIR_RWDIR_CNT][FIO_IO_U_PLAT_NR];
+	uint64_t io_u_sync_plat[FIO_IO_U_PLAT_NR];
 
 	uint64_t total_io_u[DDIR_RWDIR_SYNC_CNT];
 	uint64_t short_io_u[DDIR_RWDIR_CNT];
@@ -211,6 +211,9 @@ struct thread_stat {
 	};
 	uint32_t first_error;
 	uint64_t total_err_count;
+
+	/* ZBC stats */
+	uint64_t nr_zone_resets;
 
 	uint64_t nr_block_infos;
 	uint32_t block_infos[MAX_NR_BLOCK_INFOS];
@@ -236,8 +239,8 @@ struct thread_stat {
 	fio_fp64_t ss_criterion;
 
 	uint32_t priorityBit;
-	uint32_t io_u_plat_prio[DDIR_RWDIR_CNT][FIO_IO_U_PLAT_NR];
-	uint32_t io_u_plat_low_prio[DDIR_RWDIR_CNT][FIO_IO_U_PLAT_NR];
+	uint64_t io_u_plat_prio[DDIR_RWDIR_CNT][FIO_IO_U_PLAT_NR];
+	uint64_t io_u_plat_low_prio[DDIR_RWDIR_CNT][FIO_IO_U_PLAT_NR];
 	struct io_stat clat_prio_stat[DDIR_RWDIR_CNT];
 	struct io_stat clat_low_prio_stat[DDIR_RWDIR_CNT];
 
@@ -281,10 +284,10 @@ struct jobs_eta {
 
 struct io_u_plat_entry {
 	struct flist_head list;
-	unsigned int io_u_plat[FIO_IO_U_PLAT_NR];
+	uint64_t io_u_plat[FIO_IO_U_PLAT_NR];
 };
 
-extern struct fio_mutex *stat_mutex;
+extern struct fio_sem *stat_sem;
 
 extern struct jobs_eta *get_jobs_eta(bool force, size_t *size);
 
@@ -306,11 +309,11 @@ extern void init_thread_stat(struct thread_stat *ts);
 extern void init_group_run_stat(struct group_run_stats *gs);
 extern void eta_to_str(char *str, unsigned long eta_sec);
 extern bool calc_lat(struct io_stat *is, unsigned long long *min, unsigned long long *max, double *mean, double *dev);
-extern unsigned int calc_clat_percentiles(unsigned int *io_u_plat, unsigned long long nr, fio_fp64_t *plist, unsigned long long **output, unsigned long long *maxv, unsigned long long *minv);
+extern unsigned int calc_clat_percentiles(uint64_t *io_u_plat, unsigned long long nr, fio_fp64_t *plist, unsigned long long **output, unsigned long long *maxv, unsigned long long *minv);
 extern void stat_calc_lat_n(struct thread_stat *ts, double *io_u_lat);
 extern void stat_calc_lat_m(struct thread_stat *ts, double *io_u_lat);
 extern void stat_calc_lat_u(struct thread_stat *ts, double *io_u_lat);
-extern void stat_calc_dist(unsigned int *map, unsigned long total, double *io_u_dist);
+extern void stat_calc_dist(uint64_t *map, unsigned long total, double *io_u_dist);
 extern void reset_io_stats(struct thread_data *);
 extern void update_rusage_stat(struct thread_data *);
 extern void clear_rusage_stat(struct thread_data *);

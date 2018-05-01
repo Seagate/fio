@@ -454,7 +454,7 @@ See \fB\-\-max\-jobs\fR. Default: 1.
 Tell fio to terminate processing after the specified period of time. It
 can be quite hard to determine for how long a specified job will run, so
 this parameter is handy to cap the total runtime to a given time. When
-the unit is omitted, the value is intepreted in seconds.
+the unit is omitted, the value is interpreted in seconds.
 .TP
 .BI time_based
 If set, fio will run for the duration of the \fBruntime\fR specified
@@ -730,6 +730,39 @@ Give size of an I/O zone. See \fBzoneskip\fR.
 .BI zoneskip \fR=\fPint
 Skip the specified number of bytes when \fBzonesize\fR data has been
 read. The two zone options can be used to only do I/O on zones of a file.
+
+.SS "Zoned Block Devices"
+Zoned block devices are block devices that consist of multiple zones. Each
+zone has a type, e.g. conventional or sequential. A conventional zone can be
+written at any offset that is a multiple of the block size. Sequential zones
+must be written sequentially. The position at which a write must occur is
+called the write pointer. A zoned block device can be either drive
+managed, host managed or host aware. For host managed devices the host must
+ensure that writes happen sequentially. Fio recognizes host managed devices
+and serializes writes to sequential zones for these devices. The options that
+fio supports for zoned block devices are as follows:
+.TP
+.BI read_beyond_wp \fR=\fPbool
+If a read occurs in a sequential zone beyond the write pointer then the zoned
+block device will complete the read without reading any data from the storage
+medium. Since such reads lead to unrealistically high bandwidth and IOPS
+numbers fio only reads beyond the write pointer if explicitly told to do
+so. Default: false.
+.TP
+.BI max_open_zones \fR=\fPint
+When running a random write test across an entire drive many more zones will be
+open than in a typical application workload. Hence this command line option
+that allows to limit the number of open zones.
+.TP
+.BI zone_reset_threshold \fR=\fPfloat
+A number between zero and one that indicates the ratio of logical blocks with
+data to the total number of logical blocks in the test above which zones
+should be reset periodically.
+.BI zone_reset_frequency \fR=\fPfloat
+A number between zero and one that indicates how often a zone reset should be
+issued if the zone reset threshold has been exceeded. This and the previous
+parameter can be used to simulate garbage collection activity.
+
 .SS "I/O type"
 .TP
 .BI direct \fR=\fPbool
@@ -870,8 +903,8 @@ pre\-allocation methods are available, \fBnone\fR if not.
 .RE
 .TP
 .BI fadvise_hint \fR=\fPstr
-Use \fBposix_fadvise\fR\|(2) to advise the kernel what I/O patterns
-are likely to be issued. Accepted values are:
+Use \fBposix_fadvise\fR\|(2) or \fBposix_madvise\fR\|(2) to advise the kernel
+what I/O patterns are likely to be issued. Accepted values are:
 .RS
 .RS
 .TP
@@ -1523,7 +1556,7 @@ SCSI generic sg v3 I/O. May either be synchronous using the SG_IO
 ioctl, or if the target is an sg character device we use
 \fBread\fR\|(2) and \fBwrite\fR\|(2) for asynchronous
 I/O. Requires \fBfilename\fR option to specify either block or
-character devices.
+character devices. The sg engine includes engine specific options.
 .TP
 .B null
 Doesn't transfer any data, just pretends to. This is mainly used to
@@ -1552,7 +1585,7 @@ single CPU at the desired rate. A job never finishes unless there is
 at least one non\-cpuio job.
 .TP
 .B guasi
-The GUASI I/O engine is the Generic Userspace Asyncronous Syscall
+The GUASI I/O engine is the Generic Userspace Asynchronous Syscall
 Interface approach to async I/O. See \fIhttp://www.xmailserver.org/guasi\-lib.html\fR
 for more info on GUASI.
 .TP
@@ -1584,6 +1617,11 @@ size to the current block offset. \fBblocksize\fR is ignored.
 .B e4defrag
 I/O engine that does regular EXT4_IOC_MOVE_EXT ioctls to simulate
 defragment activity in request to DDIR_WRITE event.
+.TP
+.B rados
+I/O engine supporting direct access to Ceph Reliable Autonomic Distributed
+Object Store (RADOS) via librados. This ioengine defines engine specific
+options.
 .TP
 .B rbd
 I/O engine supporting direct access to Ceph Rados Block Devices
@@ -1623,12 +1661,12 @@ constraint.
 .TP
 .B pmemblk
 Read and write using filesystem DAX to a file on a filesystem
-mounted with DAX on a persistent memory device through the NVML
+mounted with DAX on a persistent memory device through the PMDK
 libpmemblk library.
 .TP
 .B dev\-dax
 Read and write using device DAX to a persistent memory device (e.g.,
-/dev/dax0.0) through the NVML libpmem library.
+/dev/dax0.0) through the PMDK libpmem library.
 .TP
 .B external
 Prefix to specify loading an external I/O engine object file. Append
@@ -1644,7 +1682,7 @@ done other than creating the file.
 .TP
 .B libpmem
 Read and write using mmap I/O to a file on a filesystem
-mounted with DAX on a persistent memory device through the NVML
+mounted with DAX on a persistent memory device through the PMDK
 libpmem library.
 .SS "I/O engine specific parameters"
 In addition, there are some parameters which are only valid when a specific
@@ -1773,20 +1811,24 @@ after event.
 .RE
 .RE
 .TP
-.BI (rbd)clustername \fR=\fPstr
+.BI (rbd,rados)clustername \fR=\fPstr
 Specifies the name of the Ceph cluster.
 .TP
 .BI (rbd)rbdname \fR=\fPstr
 Specifies the name of the RBD.
 .TP
-.BI (rbd)pool \fR=\fPstr
-Specifies the name of the Ceph pool containing RBD.
+.BI (rbd,rados)pool \fR=\fPstr
+Specifies the name of the Ceph pool containing RBD or RADOS data.
 .TP
-.BI (rbd)clientname \fR=\fPstr
+.BI (rbd,rados)clientname \fR=\fPstr
 Specifies the username (without the 'client.' prefix) used to access the
 Ceph cluster. If the \fBclustername\fR is specified, the \fBclientname\fR shall be
 the full *type.id* string. If no type. prefix is given, fio will add 'client.'
 by default.
+.TP
+.BI (rbd,rados)busy_poll \fR=\fPbool
+Poll store instead of waiting for completion. Usually this provides better
+throughput at cost of higher(up to 100%) CPU utilization.
 .TP
 .BI (mtd)skip_bad \fR=\fPbool
 Skip operations against known bad blocks.
@@ -1811,6 +1853,14 @@ server side this will be passed into the rdma_bind_addr() function and
 on the client site it will be used in the rdma_resolve_add()
 function. This can be useful when multiple paths exist between the
 client and the server or in certain loopback configurations.
+.TP
+.BI (sg)readfua \fR=\fPbool
+With readfua option set to 1, read operations include the force
+unit access (fua) flag. Default: 0.
+.TP
+.BI (sg)writefua \fR=\fPbool
+With writefua option set to 1, write operations include the force
+unit access (fua) flag. Default: 0.
 .SS "I/O depth"
 .TP
 .BI iodepth \fR=\fPint
@@ -2019,6 +2069,12 @@ respect the timestamps and attempt to replay them as fast as possible while
 still respecting ordering. The result is the same I/O pattern to a given
 device, but different timings.
 .TP
+.BI replay_time_scale \fR=\fPint
+When replaying I/O with \fBread_iolog\fR, fio will honor the original timing
+in the trace. With this option, it's possible to scale the time. It's a
+percentage option, if set to 50 it means run at 50% the original IO rate in
+the trace. If set to 200, run at twice the original IO rate. Defaults to 100.
+.TP
 .BI replay_redirect \fR=\fPstr
 While replaying I/O patterns using \fBread_iolog\fR the default behavior
 is to replay the IOPS onto the major/minor device that each IOP was recorded
@@ -2043,6 +2099,12 @@ value.
 .BI replay_scale \fR=\fPint
 Scale sector offsets down by this factor when replaying traces.
 .SS "Threads, processes and job synchronization"
+.TP
+.BI replay_skip \fR=\fPstr
+Sometimes it's useful to skip certain IO types in a replay trace. This could
+be, for instance, eliminating the writes in the trace. Or not replaying the
+trims/discards, if you are redirecting to a device that doesn't support them.
+This option takes a comma separated list of read, write, trim, sync.
 .TP
 .BI thread
 Fio defaults to creating jobs by using fork, however if this option is
@@ -2074,22 +2136,28 @@ systems since meaning of priority may differ.
 .BI prioclass \fR=\fPint
 Set the I/O priority class. See man \fBionice\fR\|(1).
 .TP
-.BI cpumask \fR=\fPint
-Set the CPU affinity of this job. The parameter given is a bit mask of
-allowed CPUs the job may run on. So if you want the allowed CPUs to be 1
-and 5, you would pass the decimal value of (1 << 1 | 1 << 5), or 34. See man
-\fBsched_setaffinity\fR\|(2). This may not work on all supported
-operating systems or kernel versions. This option doesn't work well for a
-higher CPU count than what you can store in an integer mask, so it can only
-control cpus 1\-32. For boxes with larger CPU counts, use
-\fBcpus_allowed\fR.
-.TP
 .BI cpus_allowed \fR=\fPstr
 Controls the same options as \fBcpumask\fR, but accepts a textual
-specification of the permitted CPUs instead. So to use CPUs 1 and 5 you
-would specify `cpus_allowed=1,5'. This option also allows a range of CPUs
-to be specified \-\- say you wanted a binding to CPUs 1, 5, and 8 to 15, you
-would set `cpus_allowed=1,5,8\-15'.
+specification of the permitted CPUs instead and CPUs are indexed from 0. So
+to use CPUs 0 and 5 you would specify `cpus_allowed=0,5'. This option also
+allows a range of CPUs to be specified \-\- say you wanted a binding to CPUs
+0, 5, and 8 to 15, you would set `cpus_allowed=0,5,8\-15'.
+.RS
+.P
+On Windows, when `cpus_allowed' is unset only CPUs from fio's current
+processor group will be used and affinity settings are inherited from the
+system. An fio build configured to target Windows 7 makes options that set
+CPUs processor group aware and values will set both the processor group
+and a CPU from within that group. For example, on a system where processor
+group 0 has 40 CPUs and processor group 1 has 32 CPUs, `cpus_allowed'
+values between 0 and 39 will bind CPUs from processor group 0 and
+`cpus_allowed' values between 40 and 71 will bind CPUs from processor
+group 1. When using `cpus_allowed_policy=shared' all CPUs specified by a
+single `cpus_allowed' option must be from the same processor group. For
+Windows fio builds not built for Windows 7, CPUs will only be selected from
+(and be relative to) whatever processor group fio happens to be running in
+and CPUs from other processor groups cannot be used.
+.RE
 .TP
 .BI cpus_allowed_policy \fR=\fPstr
 Set the policy of how fio distributes the CPUs specified by
@@ -2110,6 +2178,16 @@ enough CPUs are given for the jobs listed, then fio will roundrobin the CPUs
 in the set.
 .RE
 .TP
+.BI cpumask \fR=\fPint
+Set the CPU affinity of this job. The parameter given is a bit mask of
+allowed CPUs the job may run on. So if you want the allowed CPUs to be 1
+and 5, you would pass the decimal value of (1 << 1 | 1 << 5), or 34. See man
+\fBsched_setaffinity\fR\|(2). This may not work on all supported
+operating systems or kernel versions. This option doesn't work well for a
+higher CPU count than what you can store in an integer mask, so it can only
+control cpus 1\-32. For boxes with larger CPU counts, use
+\fBcpus_allowed\fR.
+.TP
 .BI numa_cpu_nodes \fR=\fPstr
 Set this job running on specified NUMA nodes' CPUs. The arguments allow
 comma delimited list of cpu numbers, A\-B ranges, or `all'. Note, to enable
@@ -2125,7 +2203,7 @@ arguments:
 <mode>[:<nodelist>]
 .RE
 .P
-`mode' is one of the following memory poicies: `default', `prefer',
+`mode' is one of the following memory policies: `default', `prefer',
 `bind', `interleave' or `local'. For `default' and `local' memory
 policies, no node needs to be specified. For `prefer', only one node is
 allowed. For `bind' and `interleave' the `nodelist' may be as
@@ -2235,7 +2313,7 @@ Use a crc32c sum of the data area and store it in the header of
 each block. This will automatically use hardware acceleration
 (e.g. SSE4.2 on an x86 or CRC crypto extensions on ARM64) but will
 fall back to software crc32c if none is found. Generally the
-fatest checksum fio supports when hardware accelerated.
+fastest checksum fio supports when hardware accelerated.
 .TP
 .B crc32c\-intel
 Synonym for crc32c.
@@ -2300,16 +2378,6 @@ given is a read or random read, fio will assume that it should verify a
 previously written file. If the data direction includes any form of write,
 the verify will be of the newly written data.
 .RE
-.TP
-.BI verifysort \fR=\fPbool
-If true, fio will sort written verify blocks when it deems it faster to read
-them back in a sorted manner. This is often the case when overwriting an
-existing file, since the blocks are already laid out in the file system. You
-can ignore this option unless doing huge amounts of really fast I/O where
-the red\-black tree sorting CPU time becomes significant. Default: true.
-.TP
-.BI verifysort_nr \fR=\fPint
-Pre\-load and sort verify blocks for a read workload.
 .TP
 .BI verify_offset \fR=\fPint
 Swap the verification header with data somewhere else in the block before
@@ -2586,7 +2654,8 @@ zlib.
 .BI log_compression_cpus \fR=\fPstr
 Define the set of CPUs that are allowed to handle online log compression for
 the I/O jobs. This can provide better isolation between performance
-sensitive jobs, and background compression work.
+sensitive jobs, and background compression work. See \fBcpus_allowed\fR for
+the format used.
 .TP
 .BI log_store_compressed \fR=\fPbool
 If set, fio will store the log files in a compressed format. They can be

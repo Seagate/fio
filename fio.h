@@ -20,7 +20,6 @@
 #include "fifo.h"
 #include "arch/arch.h"
 #include "os/os.h"
-#include "mutex.h"
 #include "log.h"
 #include "debug.h"
 #include "file.h"
@@ -28,6 +27,7 @@
 #include "ioengines.h"
 #include "iolog.h"
 #include "helpers.h"
+#include "minmax.h"
 #include "options.h"
 #include "profile.h"
 #include "fio_time.h"
@@ -63,6 +63,8 @@
 #include <cuda.h>
 #endif
 
+struct fio_sem;
+
 /*
  * offset generator types
  */
@@ -77,7 +79,7 @@ enum {
 	__TD_F_READ_IOLOG,
 	__TD_F_REFILL_BUFFERS,
 	__TD_F_SCRAMBLE_BUFFERS,
-	__TD_F_VER_NONE,
+	__TD_F_DO_VERIFY,
 	__TD_F_PROFILE_OPS,
 	__TD_F_COMPRESS,
 	__TD_F_COMPRESS_LOG,
@@ -98,7 +100,7 @@ enum {
 	TD_F_READ_IOLOG		= 1U << __TD_F_READ_IOLOG,
 	TD_F_REFILL_BUFFERS	= 1U << __TD_F_REFILL_BUFFERS,
 	TD_F_SCRAMBLE_BUFFERS	= 1U << __TD_F_SCRAMBLE_BUFFERS,
-	TD_F_VER_NONE		= 1U << __TD_F_VER_NONE,
+	TD_F_DO_VERIFY		= 1U << __TD_F_DO_VERIFY,
 	TD_F_PROFILE_OPS	= 1U << __TD_F_PROFILE_OPS,
 	TD_F_COMPRESS		= 1U << __TD_F_COMPRESS,
 	TD_F_COMPRESS_LOG	= 1U << __TD_F_COMPRESS_LOG,
@@ -164,6 +166,8 @@ struct zone_split_index {
 	uint64_t size_prev;
 };
 
+#define FIO_MAX_OPEN_ZBC_ZONES 128
+
 /*
  * This describes a single thread/process executing a fio job.
  */
@@ -199,7 +203,7 @@ struct thread_data {
 	struct timespec iops_sample_time;
 
 	volatile int update_rusage;
-	struct fio_mutex *rusage_sem;
+	struct fio_sem *rusage_sem;
 	struct rusage ru_start;
 	struct rusage ru_end;
 
@@ -342,7 +346,7 @@ struct thread_data {
 	uint64_t this_io_bytes[DDIR_RWDIR_CNT];
 	uint64_t io_skip_bytes;
 	uint64_t zone_bytes;
-	struct fio_mutex *mutex;
+	struct fio_sem *sem;
 	uint64_t bytes_done[DDIR_RWDIR_CNT];
 
 	/*
@@ -403,8 +407,6 @@ struct thread_data {
 	 */
 	struct flist_head trim_list;
 	unsigned long trim_entries;
-
-	struct flist_head next_rand_list;
 
 	/*
 	 * for fileservice, how often to switch to a new file

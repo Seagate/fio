@@ -2,8 +2,12 @@
  * Status and ETA code
  */
 #include <unistd.h>
-#include <fcntl.h>
 #include <string.h>
+#ifdef CONFIG_VALGRIND_DEV
+#include <valgrind/drd.h>
+#else
+#define DRD_IGNORE_VAR(x) do { } while (0)
+#endif
 
 #include "fio.h"
 #include "lib/pow2.h"
@@ -145,7 +149,7 @@ void eta_to_str(char *str, unsigned long eta_sec)
 		str += sprintf(str, "%02uh:", h);
 
 	str += sprintf(str, "%02um:", m);
-	str += sprintf(str, "%02us", s);
+	sprintf(str, "%02us", s);
 }
 
 /*
@@ -617,7 +621,7 @@ void display_thread_status(struct jobs_eta *je)
 			free(iops_str[ddir]);
 		}
 	}
-	p += sprintf(p, "\r");
+	sprintf(p, "\r");
 
 	printf("%s", output);
 
@@ -668,6 +672,7 @@ void print_thread_status(void)
 
 void print_status_init(int thr_number)
 {
+	DRD_IGNORE_VAR(__run_str);
 	__run_str[thr_number] = 'P';
 	update_condensed_str(__run_str, run_str);
 }

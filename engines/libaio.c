@@ -4,11 +4,9 @@
  * IO engine using the Linux native aio interface.
  *
  */
-#include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <errno.h>
-#include <assert.h>
 #include <libaio.h>
 
 #include "../fio.h"
@@ -183,7 +181,8 @@ static int fio_libaio_getevents(struct thread_data *td, unsigned int min,
 			events += r;
 		else if ((min && r == 0) || r == -EAGAIN) {
 			fio_libaio_commit(td);
-			usleep(100);
+			if (actual_min)
+				usleep(10);
 		} else if (r != -EINTR)
 			break;
 	} while (events < min);
@@ -191,7 +190,8 @@ static int fio_libaio_getevents(struct thread_data *td, unsigned int min,
 	return r < 0 ? r : events;
 }
 
-static int fio_libaio_queue(struct thread_data *td, struct io_u *io_u)
+static enum fio_q_status fio_libaio_queue(struct thread_data *td,
+					  struct io_u *io_u)
 {
 	struct libaio_data *ld = td->io_ops_data;
 

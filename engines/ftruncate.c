@@ -6,29 +6,25 @@
  * DDIR_WRITE does ftruncate
  *
  */
-#include <stdio.h>
-#include <stdlib.h>
-#include <unistd.h>
-#include <sys/uio.h>
 #include <errno.h>
-#include <assert.h>
-#include <fcntl.h>
+#include <unistd.h>
 
 #include "../fio.h"
-#include "../filehash.h"
 
-static int fio_ftruncate_queue(struct thread_data *td, struct io_u *io_u)
+static enum fio_q_status fio_ftruncate_queue(struct thread_data *td,
+					     struct io_u *io_u)
 {
 	struct fio_file *f = io_u->file;
 	int ret;
+
 	fio_ro_check(td, io_u);
 
 	if (io_u->ddir != DDIR_WRITE) {
 		io_u->error = EINVAL;
 		return FIO_Q_COMPLETED;
 	}
-	ret = ftruncate(f->fd, io_u->offset);
 
+	ret = ftruncate(f->fd, io_u->offset);
 	if (ret)
 		io_u->error = errno;
 

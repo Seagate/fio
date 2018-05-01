@@ -241,40 +241,27 @@ struct vcont {
 };
 
 #define DUMP_BUF_SZ	255
-static int dump_buf_warned;
 
 static void dump_buf(char *buf, unsigned int len, unsigned long long offset,
 		     const char *type, struct fio_file *f)
 {
-	char *ptr, fname[DUMP_BUF_SZ];
-	size_t buf_left = DUMP_BUF_SZ;
+	char *ptr, *fname;
+	char sep[2] = { FIO_OS_PATH_SEPARATOR, 0 };
 	int ret, fd;
 
 	ptr = strdup(f->file_name);
 
-	memset(fname, 0, sizeof(fname));
-	if (aux_path)
-		sprintf(fname, "%s%c", aux_path, FIO_OS_PATH_SEPARATOR);
-
-	strncpy(fname + strlen(fname), basename(ptr), buf_left - 1);
-
-	buf_left -= strlen(fname);
-	if (buf_left <= 0) {
-		if (!dump_buf_warned) {
-			log_err("fio: verify failure dump buffer too small\n");
-			dump_buf_warned = 1;
-		}
-		free(ptr);
-		return;
+	if (asprintf(&fname, "%s%s%s.%llu.%s", aux_path ? : "",
+		     aux_path ? sep : "", basename(ptr), offset, type) < 0) {
+		if (!fio_did_warn(FIO_WARN_VERIFY_BUF))
+			log_err("fio: not enough memory for dump buffer filename\n");
+		goto free_ptr;
 	}
-
-	snprintf(fname + strlen(fname), buf_left, ".%llu.%s", offset, type);
 
 	fd = open(fname, O_CREAT | O_TRUNC | O_WRONLY, 0644);
 	if (fd < 0) {
 		perror("open verify buf file");
-		free(ptr);
-		return;
+		goto free_fname;
 	}
 
 	while (len) {
@@ -291,6 +278,11 @@ static void dump_buf(char *buf, unsigned int len, unsigned long long offset,
 
 	close(fd);
 	log_err("       %s data dumped as %s\n", type, fname);
+
+free_fname:
+	free(fname);
+
+free_ptr:
 	free(ptr);
 }
 
@@ -751,9 +743,9 @@ int verify_io_u_async(struct thread_data *td, struct io_u **io_u_ptr)
 	}
 	flist_add_tail(&io_u->verify_list, &td->verify_list);
 	*io_u_ptr = NULL;
-	pthread_mutex_unlock(&td->io_u_lock);
 
 	pthread_cond_signal(&td->verify_cond);
+	pthread_mutex_unlock(&td->io_u_lock);
 	return 0;
 }
 
@@ -927,10 +919,9 @@ int verify_io_u(struct thread_data *td, struct io_u **io_u_ptr)
 		hdr = p;
 
 		/*
-		 * Make rand_seed check pass when have verifysort or
-		 * verify_backlog.
+		 * Make rand_seed check pass when have verify_backlog.
 		 */
-		if (td->o.verifysort || (td->flags & TD_F_VER_BACKLOG))
+		if (!td_rw(td) || (td->flags & TD_F_VER_BACKLOG))
 			io_u->rand_seed = hdr->rand_seed;
 
 		if (td->o.verify != VERIFY_PATTERN_NO_HDR) {
@@ -1310,7 +1301,7 @@ int get_next_verify(struct thread_data *td, struct io_u *io_u)
 		return 0;
 
 	if (!RB_EMPTY_ROOT(&td->io_hist_tree)) {
-		struct rb_node *n = rb_first(&td->io_hist_tree);
+		struct fio_rb_node *n = rb_first(&td->io_hist_tree);
 
 		ipo = rb_entry(n, struct io_piece, rb_node);
 
@@ -1457,9 +1448,9 @@ static void *verify_async_thread(void *data)
 done:
 	pthread_mutex_lock(&td->io_u_lock);
 	td->nr_verify_threads--;
+	pthread_cond_signal(&td->free_cond);
 	pthread_mutex_unlock(&td->io_u_lock);
 
-	pthread_cond_signal(&td->free_cond);
 	return NULL;
 }
 
@@ -1495,9 +1486,12 @@ int verify_async_init(struct thread_data *td)
 
 	if (i != td->o.verify_async) {
 		log_err("fio: only %d verify threads started, exiting\n", i);
+
+		pthread_mutex_lock(&td->io_u_lock);
 		td->verify_thread_exit = 1;
-		write_barrier();
 		pthread_cond_broadcast(&td->verify_cond);
+		pthread_mutex_unlock(&td->io_u_lock);
+
 		return 1;
 	}
 
@@ -1506,11 +1500,9 @@ int verify_async_init(struct thread_data *td)
 
 void verify_async_exit(struct thread_data *td)
 {
-	td->verify_thread_exit = 1;
-	write_barrier();
-	pthread_cond_broadcast(&td->verify_cond);
-
 	pthread_mutex_lock(&td->io_u_lock);
+	td->verify_thread_exit = 1;
+	pthread_cond_broadcast(&td->verify_cond);
 
 	while (td->nr_verify_threads)
 		pthread_cond_wait(&td->free_cond, &td->io_u_lock);

@@ -4,16 +4,12 @@
 #include <ctype.h>
 #include <string.h>
 #include <assert.h>
-#include <libgen.h>
-#include <fcntl.h>
-#include <sys/types.h>
 #include <sys/stat.h>
 #include <netinet/in.h>
 
 #include "fio.h"
 #include "verify.h"
 #include "parse.h"
-#include "lib/fls.h"
 #include "lib/pattern.h"
 #include "options.h"
 #include "optgroup.h"
@@ -344,6 +340,43 @@ static int ignore_error_type(struct thread_data *td, enum error_type_bit etype,
 
 	return 0;
 
+}
+
+static int str_replay_skip_cb(void *data, const char *input)
+{
+	struct thread_data *td = cb_data_to_td(data);
+	char *str, *p, *n;
+	int ret = 0;
+
+	if (parse_dryrun())
+		return 0;
+
+	p = str = strdup(input);
+
+	strip_blank_front(&str);
+	strip_blank_end(str);
+
+	while (p) {
+		n = strchr(p, ',');
+		if (n)
+			*n++ = '\0';
+		if (!strcmp(p, "read"))
+			td->o.replay_skip |= 1u << DDIR_READ;
+		else if (!strcmp(p, "write"))
+			td->o.replay_skip |= 1u << DDIR_WRITE;
+		else if (!strcmp(p, "trim"))
+			td->o.replay_skip |= 1u << DDIR_TRIM;
+		else if (!strcmp(p, "sync"))
+			td->o.replay_skip |= 1u << DDIR_SYNC;
+		else {
+			log_err("Unknown skip type: %s\n", p);
+			ret = 1;
+			break;
+		}
+		p = n;
+	}
+	free(str);
+	return ret;
 }
 
 static int str_ignore_error_cb(void *data, const char *input)
@@ -1521,7 +1554,7 @@ static int str_ioengine_external_cb(void *data, const char *str)
 	return 0;
 }
 
-static int rw_verify(struct fio_option *o, void *data)
+static int rw_verify(const struct fio_option *o, void *data)
 {
 	struct thread_data *td = cb_data_to_td(data);
 
@@ -1534,7 +1567,7 @@ static int rw_verify(struct fio_option *o, void *data)
 	return 0;
 }
 
-static int gtod_cpu_verify(struct fio_option *o, void *data)
+static int gtod_cpu_verify(const struct fio_option *o, void *data)
 {
 #ifndef FIO_HAVE_CPU_AFFINITY
 	struct thread_data *td = cb_data_to_td(data);
@@ -1820,11 +1853,6 @@ struct fio_option fio_options[FIO_MAX_OPTS] = {
 			    .help = "GUASI IO engine",
 			  },
 #endif
-#ifdef FIO_HAVE_BINJECT
-			  { .ival = "binject",
-			    .help = "binject direct inject block engine",
-			  },
-#endif
 #ifdef CONFIG_RDMA
 			  { .ival = "rdma",
 			    .help = "RDMA IO engine",
@@ -1860,7 +1888,7 @@ struct fio_option fio_options[FIO_MAX_OPTS] = {
 #endif
 #ifdef CONFIG_PMEMBLK
 			  { .ival = "pmemblk",
-			    .help = "NVML libpmemblk based IO engine",
+			    .help = "PMDK libpmemblk based IO engine",
 			  },
 
 #endif
@@ -1879,7 +1907,7 @@ struct fio_option fio_options[FIO_MAX_OPTS] = {
 			  },
 #ifdef CONFIG_LIBPMEM
 			  { .ival = "libpmem",
-			    .help = "NVML libpmem based IO engine",
+			    .help = "PMDK libpmem based IO engine",
 			  },
 #endif
 		},
@@ -2443,7 +2471,7 @@ struct fio_option fio_options[FIO_MAX_OPTS] = {
 		.posval	= {
 			  { .ival = "0",
 			    .oval = F_ADV_NONE,
-			    .help = "Don't issue fadvise",
+			    .help = "Don't issue fadvise/madvise",
 			  },
 			  { .ival = "1",
 			    .oval = F_ADV_TYPE,
@@ -2855,25 +2883,14 @@ struct fio_option fio_options[FIO_MAX_OPTS] = {
 	{
 		.name	= "verifysort",
 		.lname	= "Verify sort",
-		.type	= FIO_OPT_BOOL,
-		.off1	= offsetof(struct thread_options, verifysort),
-		.help	= "Sort written verify blocks for read back",
-		.def	= "1",
-		.parent = "verify",
-		.hide	= 1,
+		.type	= FIO_OPT_SOFT_DEPRECATED,
 		.category = FIO_OPT_C_IO,
 		.group	= FIO_OPT_G_VERIFY,
 	},
 	{
 		.name	= "verifysort_nr",
 		.lname	= "Verify Sort Nr",
-		.type	= FIO_OPT_INT,
-		.off1	= offsetof(struct thread_options, verifysort_nr),
-		.help	= "Pre-load and sort verify blocks for a read workload",
-		.minval	= 0,
-		.maxval	= 131072,
-		.def	= "1024",
-		.parent = "verify",
+		.type	= FIO_OPT_SOFT_DEPRECATED,
 		.category = FIO_OPT_C_IO,
 		.group	= FIO_OPT_G_VERIFY,
 	},
@@ -3166,6 +3183,30 @@ struct fio_option fio_options[FIO_MAX_OPTS] = {
 		.pow2	= 1,
 	},
 	{
+		.name	= "replay_time_scale",
+		.lname	= "Replay Time Scale",
+		.type	= FIO_OPT_INT,
+		.off1	= offsetof(struct thread_options, replay_time_scale),
+		.def	= "100",
+		.minval	= 1,
+		.parent	= "read_iolog",
+		.hide	= 1,
+		.help	= "Scale time for replay events",
+		.category = FIO_OPT_C_IO,
+		.group	= FIO_OPT_G_IOLOG,
+	},
+	{
+		.name	= "replay_skip",
+		.lname	= "Replay Skip",
+		.type	= FIO_OPT_STR,
+		.cb	= str_replay_skip_cb,
+		.off1	= offsetof(struct thread_options, replay_skip),
+		.parent	= "read_iolog",
+		.help	= "Skip certain IO types (read,write,trim,flush)",
+		.category = FIO_OPT_C_IO,
+		.group	= FIO_OPT_G_IOLOG,
+	},
+	{
 		.name	= "exec_prerun",
 		.lname	= "Pre-execute runnable",
 		.type	= FIO_OPT_STR_STORE,
@@ -3201,6 +3242,8 @@ struct fio_option fio_options[FIO_MAX_OPTS] = {
 		.help	= "Your platform does not support IO scheduler switching",
 	},
 #endif
+
+	/* Parameters for zones defined in the fio job */
 	{
 		.name	= "zonesize",
 		.lname	= "Zone size",
@@ -3234,6 +3277,57 @@ struct fio_option fio_options[FIO_MAX_OPTS] = {
 		.category = FIO_OPT_C_IO,
 		.group	= FIO_OPT_G_ZONE,
 	},
+
+#ifdef CONFIG_LINUX_BLKZONED
+	/* Parameters for zoned block devices */
+	{
+		.name	= "read_beyond_wp",
+		.lname	= "Allow reads beyond the zone write pointer",
+		.type	= FIO_OPT_BOOL,
+		.off1	= offsetof(struct thread_options, read_beyond_wp),
+		.help	= "Allow reads beyond the zone write pointer",
+		.def	= "0",
+		.category = FIO_OPT_C_IO,
+		.group	= FIO_OPT_G_INVALID,
+	},
+	{
+		.name	= "max_open_zones",
+		.lname	= "Maximum number of open zones",
+		.type	= FIO_OPT_INT,
+		.off1	= offsetof(struct thread_options, max_open_zones),
+		.maxval	= FIO_MAX_OPEN_ZBC_ZONES,
+		.help	= "Limit random writes to SMR drives to the specified"
+			  " number of sequential zones",
+		.def	= "0",
+		.category = FIO_OPT_C_IO,
+		.group	= FIO_OPT_G_INVALID,
+	},
+	{
+		.name	= "zone_reset_threshold",
+		.lname	= "Zone reset threshold",
+		.help	= "Zoned block device reset threshold",
+		.type	= FIO_OPT_FLOAT_LIST,
+		.maxlen	= 1,
+		.off1	= offsetof(struct thread_options, zrt),
+		.minfp	= 0,
+		.maxfp	= 1,
+		.category = FIO_OPT_C_IO,
+		.group	= FIO_OPT_G_ZONE,
+	},
+	{
+		.name	= "zone_reset_frequency",
+		.lname	= "Zone reset frequency",
+		.help	= "Zoned block device zone reset frequency in HZ",
+		.type	= FIO_OPT_FLOAT_LIST,
+		.maxlen	= 1,
+		.off1	= offsetof(struct thread_options, zrf),
+		.minfp	= 0,
+		.maxfp	= 1,
+		.category = FIO_OPT_C_IO,
+		.group	= FIO_OPT_G_ZONE,
+	},
+#endif
+
 	{
 		.name	= "lockmem",
 		.lname	= "Lock memory",
@@ -4432,15 +4526,15 @@ struct fio_option fio_options[FIO_MAX_OPTS] = {
 		.prio	= 1,
 		.posval = {
 			  { .ival = "0",
-			    .oval = 0,
+			    .oval = N2S_NONE,
 			    .help = "Auto-detect",
 			  },
 			  { .ival = "8",
-			    .oval = 8,
+			    .oval = N2S_BYTEPERSEC,
 			    .help = "Normal (byte based)",
 			  },
 			  { .ival = "1",
-			    .oval = 1,
+			    .oval = N2S_BITPERSEC,
 			    .help = "Bit based",
 			  },
 		},
@@ -4908,7 +5002,7 @@ int fio_options_parse(struct thread_data *td, char **opts, int num_opts)
 	opts_copy = dup_and_sub_options(opts, num_opts);
 
 	for (ret = 0, i = 0, unknown = 0; i < num_opts; i++) {
-		struct fio_option *o;
+		const struct fio_option *o;
 		int newret = parse_option(opts_copy[i], opts[i], fio_options,
 						&o, &td->o, &td->opt_list);
 
@@ -4934,7 +5028,7 @@ int fio_options_parse(struct thread_data *td, char **opts, int num_opts)
 			opts = opts_copy;
 		}
 		for (i = 0; i < num_opts; i++) {
-			struct fio_option *o = NULL;
+			const struct fio_option *o = NULL;
 			int newret = 1;
 
 			if (!opts_copy[i])
@@ -4965,9 +5059,9 @@ int fio_cmd_option_parse(struct thread_data *td, const char *opt, char *val)
 
 	ret = parse_cmd_option(opt, val, fio_options, &td->o, &td->opt_list);
 	if (!ret) {
-		struct fio_option *o;
+		const struct fio_option *o;
 
-		o = find_option(fio_options, opt);
+		o = find_option_c(fio_options, opt);
 		if (o)
 			fio_option_mark_set(&td->o, o);
 	}
@@ -5032,7 +5126,7 @@ unsigned int fio_get_kb_base(void *data)
 	return kb_base;
 }
 
-int add_option(struct fio_option *o)
+int add_option(const struct fio_option *o)
 {
 	struct fio_option *__o;
 	int opt_index = 0;
@@ -5169,7 +5263,7 @@ bool __fio_option_is_set(struct thread_options *o, unsigned int off1)
 	return false;
 }
 
-void fio_option_mark_set(struct thread_options *o, struct fio_option *opt)
+void fio_option_mark_set(struct thread_options *o, const struct fio_option *opt)
 {
 	unsigned int opt_off, index, offset;
 

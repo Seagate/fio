@@ -1,7 +1,7 @@
 #!/bin/sh
 #
 # Fio configure script. Heavily influenced by the manual qemu configure
-# script. Sad this this is easier than autoconf and enemies.
+# script. Sad this is easier than autoconf and enemies.
 #
 
 # set temporary file name
@@ -145,6 +145,8 @@ devdax="no"
 pmem="no"
 disable_lex=""
 disable_pmem="no"
+disable_native="no"
+march_set="no"
 prefix=/usr/local
 
 # parse options
@@ -165,6 +167,8 @@ for opt do
   ;;
   --build-32bit-win) build_32bit_win="yes"
   ;;
+  --target-win-ver=*) target_win_ver="$optarg"
+  ;;
   --build-static) build_static="yes"
   ;;
   --enable-gfio) gfio_check="yes"
@@ -173,9 +177,9 @@ for opt do
   ;;
   --disable-rdma) disable_rdma="yes"
   ;;
-  --disable-rbd) disable_rbd="yes"
+  --disable-rados) disable_rados="yes"
   ;;
-  --disable-rbd-blkin) disable_rbd_blkin="yes"
+  --disable-rbd) disable_rbd="yes"
   ;;
   --disable-gfapi) disable_gfapi="yes"
   ;;
@@ -193,6 +197,8 @@ for opt do
   ;;
   --enable-cuda) enable_cuda="yes"
   ;;
+  --disable-native) disable_native="yes"
+  ;;
   --help)
     show_help="yes"
     ;;
@@ -209,6 +215,7 @@ if test "$show_help" = "yes" ; then
   echo "--cc=                   Specify compiler to use"
   echo "--extra-cflags=         Specify extra CFLAGS to pass to compiler"
   echo "--build-32bit-win       Enable 32-bit build on Windows"
+  echo "--target-win-ver=       Minimum version of Windows to target (XP or 7)"
   echo "--build-static          Build a static fio"
   echo "--esx                   Configure build options for esx"
   echo "--enable-gfio           Enable building of gtk gfio"
@@ -222,6 +229,7 @@ if test "$show_help" = "yes" ; then
   echo "--disable-shm           Disable SHM support"
   echo "--disable-optimizations Don't enable compiler optimizations"
   echo "--enable-cuda           Enable GPUDirect RDMA support"
+  echo "--disable-native        Don't build for native host"
   exit $exit_val
 fi
 
@@ -247,6 +255,8 @@ elif check_define __linux__ ; then
   targetos="Linux"
 elif check_define __OpenBSD__ ; then
   targetos='OpenBSD'
+elif check_define __NetBSD__ ; then
+  targetos='NetBSD'
 elif check_define __sun__ ; then
   targetos='SunOS'
   CFLAGS="$CFLAGS -D_REENTRANT"
@@ -275,7 +285,7 @@ fi
 # cross-compiling to one of these OSes then you'll need to specify
 # the correct CPU with the --cpu option.
 case $targetos in
-AIX|OpenBSD)
+AIX|OpenBSD|NetBSD)
   # Unless explicitly enabled, turn off lex.
   # OpenBSD will hit syntax error when enabled.
   if test -z "$disable_lex" ; then
@@ -318,34 +328,31 @@ CYGWIN*)
   if test -z "${CC}${cross_prefix}"; then
     if test ! -z "$build_32bit_win" && test "$build_32bit_win" = "yes"; then
       cc="i686-w64-mingw32-gcc"
-      if test -e "../zlib/contrib/vstudio/vc14/x86/ZlibStatReleaseWithoutAsm/zlibstat.lib"; then
-        echo "Building with zlib support"
-        output_sym "CONFIG_ZLIB"
-        echo "LIBS=../zlib/contrib/vstudio/vc14/x86/ZlibStatReleaseWithoutAsm/zlibstat.lib" >> $config_host_mak
-      fi
     else
       cc="x86_64-w64-mingw32-gcc"
-      if test -e "../zlib/contrib/vstudio/vc14/x64/ZlibStatReleaseWithoutAsm/zlibstat.lib"; then
-        echo "Building with zlib support"
-        output_sym "CONFIG_ZLIB"
-        echo "LIBS=../zlib/contrib/vstudio/vc14/x64/ZlibStatReleaseWithoutAsm/zlibstat.lib" >> $config_host_mak
-      fi
     fi
   fi
-  if test ! -z "$build_32bit_win" && test "$build_32bit_win" = "yes"; then
-    output_sym "CONFIG_32BIT"
-  else
-    output_sym "CONFIG_64BIT_LLP64"
+
+  target_win_ver=$(echo "$target_win_ver" | tr '[:lower:]' '[:upper:]')
+  if test -z "$target_win_ver"; then
+    # Default Windows API target
+    target_win_ver="7"
   fi
+  if test "$target_win_ver" = "XP"; then
+    output_sym "CONFIG_WINDOWS_XP"
+  elif test "$target_win_ver" = "7"; then
+    output_sym "CONFIG_WINDOWS_7"
+    CFLAGS="$CFLAGS -D_WIN32_WINNT=0x0601"
+  else
+    fatal "Unknown target Windows version"
+  fi
+
   # We need this to be output_sym'd here because this is Windows specific.
   # The regular configure path never sets this config.
   output_sym "CONFIG_WINDOWSAIO"
   # We now take the regular configuration path without having exit 0 here.
   # Flags below are still necessary mostly for MinGW.
   socklen_t="yes"
-  sfaa="yes"
-  sync_sync="yes"
-  cmp_swap="yes"
   rusage_thread="yes"
   fdatasync="yes"
   clock_gettime="yes" # clock_monotonic probe has dependency on this
@@ -353,11 +360,7 @@ CYGWIN*)
   gettimeofday="yes"
   sched_idle="yes"
   tcp_nodelay="yes"
-  tls_thread="yes"
-  static_assert="yes"
   ipv6="yes"
-  mkdir_two="no"
-  echo "BUILD_CFLAGS=$CFLAGS -I../zlib -include config-host.h -D_GNU_SOURCE" >> $config_host_mak
   ;;
 esac
 
@@ -501,6 +504,9 @@ fi
 print_config "Operating system" "$targetos"
 print_config "CPU" "$cpu"
 print_config "Big endian" "$bigendian"
+if test ! -z "$target_win_ver"; then
+  print_config "Target Windows version" "$target_win_ver"
+fi
 print_config "Compiler" "$cc"
 print_config "Cross compile" "$cross_compile"
 echo
@@ -603,7 +609,7 @@ int main(void)
 EOF
 if compile_prog "" "" "posixaio" ; then
   posix_aio="yes"
-elif compile_prog "" "-lrt" "posixaio"; then
+elif compile_prog "" "-lrt" "posixaio -lrt"; then
   posix_aio="yes"
   posix_aio_lrt="yes"
   LIBS="-lrt $LIBS"
@@ -785,6 +791,40 @@ if test "$disable_rdma" != "yes" && compile_prog "" "-lrdmacm" "rdma"; then
     LIBS="-lrdmacm $LIBS"
 fi
 print_config "rdmacm" "$rdmacm"
+
+##########################################
+# asprintf() and vasprintf() probes
+if test "$have_asprintf" != "yes" ; then
+  have_asprintf="no"
+fi
+cat > $TMPC << EOF
+#include <stdio.h>
+
+int main(int argc, char **argv)
+{
+  return asprintf(NULL, "%s", "str") == 0;
+}
+EOF
+if compile_prog "" "" "have_asprintf"; then
+    have_asprintf="yes"
+fi
+print_config "asprintf()" "$have_asprintf"
+
+if test "$have_vasprintf" != "yes" ; then
+  have_vasprintf="no"
+fi
+cat > $TMPC << EOF
+#include <stdio.h>
+
+int main(int argc, char **argv)
+{
+  return vasprintf(NULL, "%s", NULL) == 0;
+}
+EOF
+if compile_prog "" "" "have_vasprintf"; then
+    have_vasprintf="yes"
+fi
+print_config "vasprintf()" "$have_vasprintf"
 
 ##########################################
 # Linux fallocate probe
@@ -1527,6 +1567,35 @@ fi
 print_config "IPv6 helpers" "$ipv6"
 
 ##########################################
+# check for rados
+if test "$rados" != "yes" ; then
+  rados="no"
+fi
+cat > $TMPC << EOF
+#include <rados/librados.h>
+
+int main(int argc, char **argv)
+{
+  rados_t cluster;
+  rados_ioctx_t io_ctx;
+  const char cluster_name[] = "ceph";
+  const char user_name[] = "client.admin";
+  const char pool[] = "rados";
+
+  /* The rados_create2 signature required was only introduced in ceph 0.65 */
+  rados_create2(&cluster, cluster_name, user_name, 0);
+  rados_ioctx_create(cluster, pool, &io_ctx);
+
+  return 0;
+}
+EOF
+if test "$disable_rados" != "yes"  && compile_prog "" "-lrados" "rados"; then
+  LIBS="-lrados $LIBS"
+  rados="yes"
+fi
+print_config "Rados engine" "$rados"
+
+##########################################
 # check for rbd
 if test "$rbd" != "yes" ; then
   rbd="no"
@@ -1606,36 +1675,6 @@ if compile_prog "" "-lrbd -lrados" "rbd"; then
 fi
 print_config "rbd_invalidate_cache" "$rbd_inval"
 fi
-
-##########################################
-# check for blkin
-if test "$rbd_blkin" != "yes" ; then
-  rbd_blkin="no"
-fi
-cat > $TMPC << EOF
-#include <rbd/librbd.h>
-#include <zipkin_c.h>
-
-int main(int argc, char **argv)
-{
-  int r;
-  struct blkin_trace_info t_info;
-  blkin_init_trace_info(&t_info);
-  rbd_completion_t completion;
-  rbd_image_t image;
-  uint64_t off;
-  size_t len;
-  const char *buf;
-  r = rbd_aio_write_traced(image, off, len, buf, completion, &t_info);
-  return 0;
-}
-EOF
-if test "$disable_rbd" != "yes" && test "$disable_rbd_blkin" != "yes" \
- && compile_prog "" "-lrbd -lrados -lblkin" "rbd_blkin"; then
-  LIBS="-lblkin $LIBS"
-  rbd_blkin="yes"
-fi
-print_config "rbd blkin tracing" "$rbd_blkin"
 
 ##########################################
 # Check whether we have setvbuf
@@ -1855,15 +1894,15 @@ fi
 
 ##########################################
 # Report whether pmemblk engine is enabled
-print_config "NVML pmemblk engine" "$pmemblk"
+print_config "PMDK pmemblk engine" "$pmemblk"
 
 ##########################################
 # Report whether dev-dax engine is enabled
-print_config "NVML dev-dax engine" "$devdax"
+print_config "PMDK dev-dax engine" "$devdax"
 
 ##########################################
 # Report whether libpmem engine is enabled
-print_config "NVML libpmem engine" "$pmem"
+print_config "PMDK libpmem engine" "$pmem"
 
 ##########################################
 # Check if we have lex/yacc available
@@ -2054,24 +2093,66 @@ fi
 print_config "strndup" "$strndup"
 
 ##########################################
+# <valgrind/drd.h> probe
+# Note: presence of <valgrind/drd.h> implies that <valgrind/valgrind.h> is
+# also available but not the other way around.
+if test "$valgrind_dev" != "yes" ; then
+  valgrind_dev="no"
+fi
+cat > $TMPC << EOF
+#include <valgrind/drd.h>
+int main(int argc, char **argv)
+{
+  return 0;
+}
+EOF
+if compile_prog "" "" "valgrind_dev"; then
+  valgrind_dev="yes"
+fi
+print_config "Valgrind headers" "$valgrind_dev"
+
+##########################################
+# <linux/blkzoned.h> probe
+if test "$linux_blkzoned" != "yes" ; then
+  linux_blkzoned="no"
+fi
+cat > $TMPC << EOF
+#include <linux/blkzoned.h>
+int main(int argc, char **argv)
+{
+  return 0;
+}
+EOF
+if compile_prog "" "" "linux_blkzoned"; then
+  linux_blkzoned="yes"
+fi
+print_config "Zoned block device support" "$linux_blkzoned"
+
+##########################################
 # check march=armv8-a+crc+crypto
 if test "$march_armv8_a_crc_crypto" != "yes" ; then
   march_armv8_a_crc_crypto="no"
 fi
 if test "$cpu" = "arm64" ; then
   cat > $TMPC <<EOF
-#include <sys/auxv.h>
 #include <arm_acle.h>
 #include <arm_neon.h>
+#include <sys/auxv.h>
 
 int main(void)
 {
-  return 0;
+  /* Can we also do a runtime probe? */
+#if __linux__
+  return getauxval(AT_HWCAP);
+#else
+# error "Don't know how to do runtime probe for ARM CRC32c"
+#endif
 }
 EOF
-  if compile_prog "-march=armv8-a+crc+crypto" "" ""; then
+  if compile_prog "-march=armv8-a+crc+crypto" "" "ARM CRC32c"; then
     march_armv8_a_crc_crypto="yes"
-    CFLAGS="$CFLAGS -march=armv8-a+crc+crypto -DARCH_HAVE_CRC_CRYPTO"
+    CFLAGS="$CFLAGS -march=armv8-a+crc+crypto"
+    march_set="yes"
   fi
 fi
 print_config "march_armv8_a_crc_crypto" "$march_armv8_a_crc_crypto"
@@ -2110,6 +2191,21 @@ if compile_prog "" "" "mkdir(a, b)"; then
 fi
 print_config "mkdir(a, b)" "$mkdir_two"
 
+##########################################
+# check for cc -march=native
+build_native="no"
+cat > $TMPC << EOF
+int main(int argc, char **argv)
+{
+  return 0;
+}
+EOF
+if test "$disable_native" = "no" && test "$disable_opt" != "yes" && \
+   compile_prog "-march=native" "" "march=native"; then
+  build_native="yes"
+fi
+print_config "Build march=native" "$build_native"
+
 #############################################################################
 
 if test "$wordsize" = "64" ; then
@@ -2138,6 +2234,12 @@ if test "$posix_aio_fsync" = "yes" ; then
 fi
 if test "$posix_pshared" = "yes" ; then
   output_sym "CONFIG_PSHARED"
+fi
+if test "$have_asprintf" = "yes" ; then
+    output_sym "CONFIG_HAVE_ASPRINTF"
+fi
+if test "$have_vasprintf" = "yes" ; then
+    output_sym "CONFIG_HAVE_VASPRINTF"
 fi
 if test "$linux_fallocate" = "yes" ; then
   output_sym "CONFIG_LINUX_FALLOCATE"
@@ -2262,6 +2364,9 @@ fi
 if test "$ipv6" = "yes" ; then
   output_sym "CONFIG_IPV6"
 fi
+if test "$rados" = "yes" ; then
+  output_sym "CONFIG_RADOS"
+fi
 if test "$rbd" = "yes" ; then
   output_sym "CONFIG_RBD"
 fi
@@ -2271,15 +2376,13 @@ fi
 if test "$rbd_inval" = "yes" ; then
   output_sym "CONFIG_RBD_INVAL"
 fi
-if test "$rbd_blkin" = "yes" ; then
-  output_sym "CONFIG_RBD_BLKIN"
-fi
 if test "$setvbuf" = "yes" ; then
   output_sym "CONFIG_SETVBUF"
 fi
 if test "$s390_z196_facilities" = "yes" ; then
   output_sym "CONFIG_S390_Z196_FACILITIES"
   CFLAGS="$CFLAGS -march=z9-109"
+  march_set="yes"
 fi
 if test "$gfapi" = "yes" ; then
   output_sym "CONFIG_GFAPI"
@@ -2341,14 +2444,29 @@ fi
 if test "$disable_opt" = "yes" ; then
   output_sym "CONFIG_DISABLE_OPTIMIZATIONS"
 fi
+if test "$valgrind_dev" = "yes"; then
+  output_sym "CONFIG_VALGRIND_DEV"
+fi
+if test "$linux_blkzoned" = "yes" ; then
+  output_sym "CONFIG_LINUX_BLKZONED"
+fi
 if test "$zlib" = "no" ; then
-  echo "Consider installing zlib-dev (zlib-devel), some fio features depend on it."
+  echo "Consider installing zlib-dev (zlib-devel, some fio features depend on it."
+  if test "$build_static" = "yes"; then
+    echo "Note that some distros have separate packages for static libraries."
+  fi
+fi
+if test "$march_armv8_a_crc_crypto" = "yes" ; then
+  output_sym "ARCH_HAVE_CRC_CRYPTO"
 fi
 if test "$cuda" = "yes" ; then
   output_sym "CONFIG_CUDA"
 fi
 if test "$mkdir_two" = "yes" ; then
   output_sym "CONFIG_HAVE_MKDIR_TWO"
+fi
+if test "$march_set" = "no" && test "$build_native" = "yes" ; then
+  output_sym "CONFIG_BUILD_NATIVE"
 fi
 
 echo "LIBS+=$LIBS" >> $config_host_mak

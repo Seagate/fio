@@ -1,17 +1,13 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <time.h>
 #include <math.h>
 #include <string.h>
-#include <unistd.h>
-#include <sys/types.h>
-#include <sys/stat.h>
 
 #include "../lib/lfsr.h"
 #include "../gettime.h"
 #include "../fio_time.h"
 
-void usage()
+static void usage(void)
 {
 	printf("Usage: lfsr-test 0x<numbers> [seed] [spin] [verify]\n");
 	printf("-------------------------------------------------------------\n");

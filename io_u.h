@@ -3,7 +3,6 @@
 
 #include "compiler/compiler.h"
 #include "os/os.h"
-#include "log.h"
 #include "io_ddir.h"
 #include "debug.h"
 #include "file.h"
@@ -15,6 +14,8 @@
 #ifdef CONFIG_GUASI
 #include <guasi.h>
 #endif
+
+enum fio_q_status;
 
 enum {
 	IO_U_F_FREE		= 1 << 0,
@@ -95,6 +96,12 @@ struct io_u {
 	};
 
 	/*
+	 * Post-submit callback. Used by the ZBC code.
+	 */
+	void (*post_submit)(const struct io_u *,
+			    enum fio_q_status submit_result);
+
+	/*
 	 * Callback for io completion
 	 */
 	int (*end_io)(struct thread_data *, struct io_u **);
@@ -114,9 +121,6 @@ struct io_u {
 #endif
 #ifdef CONFIG_SOLARISAIO
 		aio_result_t resultp;
-#endif
-#ifdef FIO_HAVE_BINJECT
-		struct b_user_cmd buc;
 #endif
 #ifdef CONFIG_RDMA
 		struct ibv_mr *mr;
@@ -146,7 +150,7 @@ void io_u_mark_submit(struct thread_data *, unsigned int);
 bool queue_full(const struct thread_data *);
 
 int do_io_u_sync(const struct thread_data *, struct io_u *);
-int do_io_u_trim(const struct thread_data *, struct io_u *);
+int do_io_u_trim(struct thread_data *, struct io_u *);
 
 #ifdef FIO_INC_DEBUG
 static inline void dprint_io_u(struct io_u *io_u, const char *p)
