@@ -646,8 +646,8 @@ struct fio_zone_info *zbc_convert_to_open_zone(struct thread_data *td,
 	assert(is_valid_offset(f, io_u->offset));
 
 	pthread_mutex_lock(&f->zbd_info->mutex);
-	open_zone_idx = (io_u->offset - f->file_offset) *
-		f->zbd_info->num_open_zones / f->io_size;
+	open_zone_idx = (io_u->offset / td->o.min_bs[io_u->ddir]) %
+	                f->zbd_info->num_open_zones;
 	assert(open_zone_idx < FIO_MAX_OPEN_ZBC_ZONES);
 	zone_idx = f->zbd_info->open_zones[open_zone_idx];
 	pthread_mutex_unlock(&f->zbd_info->mutex);
