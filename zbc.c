@@ -914,7 +914,7 @@ enum io_u_action zbc_adjust_block(struct thread_data *td, struct io_u *io_u)
 		zone_idx_e = zbc_zone_idx(f, (zb->wp << 9) + io_u->buflen - 1);
 		assert(td->o.zrf.u.f == 0 || f->zbd_info->write_cnt > 0);
 		/* Check whether the zone reset threshold has been exceeded */
-		if (td->o.zrf.u.f) {
+		if (td->o.zrf.u.f && !td->o.skip_zone_resets) {
 			check_swd(td, f);
 			if ((f->zbd_info->sectors_with_data << 9) >=
 			    f->io_size * td->o.zrt.u.f &&
@@ -924,18 +924,27 @@ enum io_u_action zbc_adjust_block(struct thread_data *td, struct io_u *io_u)
 		}
 		/* Reset the zone pointer if necessary */
 		if (zb->reset_zone || zbc_zone_full(f, zb)) {
+			if (td->o.skip_zone_resets) {
+				if (zb)
+					pthread_mutex_unlock(&zb->mutex);
+				return io_u_retry;
+			}
 			zb->reset_zone = 0;
 			assert(td->o.verify == VERIFY_NONE);
 			if (zbc_drain_queue(td) < 0)
+			{
 				goto eof;
-			if (zbc_reset_zone(td, f, zb) < 0)
+			}
+			if (zbc_reset_zone(td, f, zb) < 0) {
 				goto eof;
+			}
 			check_swd(td, f);
 			zone_idx_e = zbc_zone_idx(f, (zb->wp << 9) +
 						  io_u->buflen - 1);
 			assert(zone_idx_b <= zone_idx_e);
 		}
 		/* Make writes occur at the write pointer */
+
 		assert(!zbc_zone_full(f, zb));
 		io_u->offset = zb->wp << 9;
 		if (!is_valid_offset(f, io_u->offset)) {

@@ -3326,6 +3326,16 @@ struct fio_option fio_options[FIO_MAX_OPTS] = {
 		.category = FIO_OPT_C_IO,
 		.group	= FIO_OPT_G_ZONE,
 	},
+	{
+		.name	= "skip_zone_resets",
+		.lname	= "Skip zone resets",
+		.type	= FIO_OPT_BOOL,
+		.off1	= offsetof(struct thread_options, skip_zone_resets),
+		.help	= "Do not reset full zones",
+		.def	= "0",
+		.category = FIO_OPT_C_IO,
+		.group	= FIO_OPT_G_INVALID,
+	},
 #endif
 
 	{

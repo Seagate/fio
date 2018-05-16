@@ -866,7 +866,10 @@ static int fill_io_u(struct thread_data *td, struct io_u *io_u)
 {
 	bool is_random;
 	enum io_u_action ret;
+	uint32_t retries;
 
+	retries = 0;
+get_io_u:
 	if (td_ioengine_flagged(td, FIO_NOIO))
 		goto out;
 
@@ -903,6 +906,29 @@ static int fill_io_u(struct thread_data *td, struct io_u *io_u)
 	ret = zbc_adjust_block(td, io_u);
 	if (ret == io_u_eof)
 		return 1;
+	else if (ret == io_u_retry)
+	{
+		/*
+		 * Retry is only returned when a write hits a full zone and
+		 * skip_resets is set. Nothing to do but return if this is
+		 * a sequential workload.
+		 */
+		if (!is_random) {
+			dprint(FD_ZBC, "Skip reset option set and sequential write "
+				   "encountered full zone at offset 0x%llx\n",
+				   (unsigned long long) io_u->offset);
+			return 1;
+		}
+		retries++;
+		if (retries > 1000) {
+			dprint(FD_ZBC, "Exiting random workload after picking %d write "
+				   "offsets with skip reset option set (offset 0x%llx)\n",
+				   retries,
+				   (unsigned long long) io_u->offset);
+			return 1;
+		}
+		goto get_io_u;
+	}
 
 	if (io_u->offset + io_u->buflen > io_u->file->real_file_size) {
 		dprint(FD_IO, "io_u %p, off=0x%llx + len=0x%lx exceeds file size=0x%llx\n",

@@ -328,6 +328,7 @@ struct thread_options {
 	int max_open_zones;
 	fio_fp64_t zrt;
 	fio_fp64_t zrf;
+	unsigned int skip_zone_resets;
 #endif
 };
 

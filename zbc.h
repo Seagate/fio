@@ -24,6 +24,7 @@ enum blk_zoned_model {
 enum io_u_action {
 	io_u_accept	= 0,
 	io_u_eof	= 1,
+	io_u_retry  = 2,
 };
 
 /**
