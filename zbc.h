@@ -102,8 +102,8 @@ static inline void zbc_file_reset(struct thread_data *td, struct fio_file *f)
 {
 }
 
-static inline enum io_u_action
-zbc_adjust_block(struct thread_data *td, struct io_u *io_u)
+static inline enum io_u_action zbc_adjust_block(struct thread_data *td,
+						struct io_u *io_u)
 {
 	return io_u_accept;
 }

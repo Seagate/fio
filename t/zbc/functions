@@ -30,6 +30,18 @@ first_sequential_zone() {
     fi
 }
 
+max_open_zones() {
+    local dev=$1
+
+    if [ -n "${blkzone}" ]; then
+	# To do: query the maximum number of open zones using sg_raw
+	return 1
+    else
+	${zbc_report_zones} "$dev" |
+	    sed -n 's/^[[:blank:]]*Maximum number of open sequential write required zones:[[:blank:]]*//p'
+    fi
+}
+
 # Reset the write pointer of one zone on device $1 at offset $2. The offset must
 # be specified in units of 512 byte sectors.
 reset_zone() {

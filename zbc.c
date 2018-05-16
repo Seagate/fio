@@ -52,6 +52,13 @@ static bool is_valid_offset(const struct fio_file *f, uint64_t offset)
 	return (uint64_t)(offset - f->file_offset) < f->io_size;
 }
 
+static bool is_valid_zone_ptr(const struct fio_file *f,
+			      const struct fio_zone_info *z)
+{
+	return f->zbd_info->zone_info <= z &&
+		z < f->zbd_info->zone_info + f->zbd_info->nr_zones;
+}
+
 /* Verify whether direct I/O is used for all ZBC drives. */
 static bool zbc_using_direct_io(void)
 {
@@ -403,6 +410,7 @@ static int zbc_reset_range(struct thread_data *td, const struct fio_file *f,
 	zone_idx_e = zbc_zone_idx(f, (sector + nr_sectors) << 9);
 	ze = &f->zbd_info->zone_info[zone_idx_e];
 	for (z = zb; z < ze; z++) {
+		assert(is_valid_zone_ptr(f, z));
 		pthread_mutex_lock(&z->mutex);
 		pthread_mutex_lock(&f->zbd_info->mutex);
 		f->zbd_info->sectors_with_data -= z->wp - z->start;
@@ -446,6 +454,7 @@ static int zbc_reset_zones(struct thread_data *td, struct fio_file *f,
 	dprint(FD_ZBC, "%s: resetting zones\n", f->file_name);
 	assert(f->fd != -1);
 	for (z = zb; z < ze; z++) {
+		assert(is_valid_zone_ptr(f, z));
 		pthread_mutex_lock(&z->mutex);
 		switch (z->type) {
 		case BLK_ZONE_TYPE_SEQWRITE_REQ:
@@ -520,6 +529,7 @@ static void check_swd(const struct thread_data *td, const struct fio_file *f)
 						  f->io_size)];
 	swd = 0;
 	for (z = zb; z < ze; z++) {
+		assert(is_valid_zone_ptr(f, z));
 		pthread_mutex_lock(&z->mutex);
 		swd += z->wp - z->start;
 	}
@@ -544,6 +554,7 @@ void zbc_file_reset(struct thread_data *td, struct fio_file *f)
 	zone_idx_e = zbc_zone_idx(f, f->file_offset + f->io_size);
 	ze = &f->zbd_info->zone_info[zone_idx_e];
 	for (z = zb ; z < ze; z++) {
+		assert(is_valid_zone_ptr(f, z));
 		pthread_mutex_lock(&z->mutex);
 		swd += z->wp - z->start;
 	}
@@ -646,6 +657,10 @@ struct fio_zone_info *zbc_convert_to_open_zone(struct thread_data *td,
 	assert(is_valid_offset(f, io_u->offset));
 
 	pthread_mutex_lock(&f->zbd_info->mutex);
+	if (f->zbd_info->num_open_zones == 0) {
+		pthread_mutex_unlock(&f->zbd_info->mutex);
+		return NULL;
+	}
 	open_zone_idx = (io_u->offset / td->o.min_bs[io_u->ddir]) %
 	                f->zbd_info->num_open_zones;
 	assert(open_zone_idx < FIO_MAX_OPEN_ZBC_ZONES);
@@ -654,6 +669,7 @@ struct fio_zone_info *zbc_convert_to_open_zone(struct thread_data *td,
 
 	z = &f->zbd_info->zone_info[zone_idx];
 
+	assert(is_valid_zone_ptr(f, z));
 	pthread_mutex_lock(&z->mutex);
 	if ((z->wp << 9) + io_u->buflen <= ((z+1)->start << 9))
 		goto out;
@@ -663,12 +679,14 @@ struct fio_zone_info *zbc_convert_to_open_zone(struct thread_data *td,
 	for (i = f->io_size / f->zbd_info->zone_size; i > 0; i--) {
 		zone_idx++;
 		pthread_mutex_unlock(&z->mutex);
+		assert(is_valid_zone_ptr(f, z));
 		z++;
 		if (!is_valid_offset(f, z->start << 9)) {
 			zone_idx = zbc_zone_idx(f, f->file_offset);
 			z = &f->zbd_info->zone_info[zone_idx];
 		}
 		assert(is_valid_offset(f, z->start << 9));
+		assert(is_valid_zone_ptr(f, z));
 		pthread_mutex_lock(&z->mutex);
 		if (z->open)
 			continue;
@@ -696,6 +714,7 @@ struct fio_zone_info *zbc_convert_to_open_zone(struct thread_data *td,
 
 		z = &f->zbd_info->zone_info[zone_idx];
 
+		assert(is_valid_zone_ptr(f, z));
 		pthread_mutex_lock(&z->mutex);
 		if ((z->wp << 9) + io_u->buflen <= ((z+1)->start << 9))
 			goto out;
@@ -762,6 +781,7 @@ zbc_find_zone(struct thread_data *td, struct io_u *io_u,
 	 */
 	for (z1 = zb + 1, z2 = zb - 1; z1 < zl || z2 >= zf; z1++, z2--) {
 		if (z1 < zl) {
+			assert(is_valid_zone_ptr(f, z1));
 			pthread_mutex_lock(&z1->mutex);
 			if (z1->start + (io_u->buflen >> 9) <= z1->wp)
 				return z1;
@@ -770,6 +790,7 @@ zbc_find_zone(struct thread_data *td, struct io_u *io_u,
 			break;
 		}
 		if (td_random(td) && z2 >= zf) {
+			assert(is_valid_zone_ptr(f, z2));
 			pthread_mutex_lock(&z2->mutex);
 			if (z2->start + (io_u->buflen >> 9) <= z2->wp)
 				return z2;
@@ -844,8 +865,9 @@ enum io_u_action zbc_adjust_block(struct thread_data *td, struct io_u *io_u)
 	const struct fio_file *f = io_u->file;
 	uint32_t zone_idx_b, zone_idx_e;
 	struct fio_zone_info *zb, *zl;
-	uint32_t orig_len = io_u->buflen, new_len;
+	uint32_t orig_len = io_u->buflen;
 	uint32_t min_bs = td->o.min_bs[io_u->ddir];
+	uint64_t new_end;
 	int64_t range;
 
 	if (!f->zbd_info)
@@ -862,6 +884,7 @@ enum io_u_action zbc_adjust_block(struct thread_data *td, struct io_u *io_u)
 	if (io_u->ddir == DDIR_READ && td->o.read_beyond_wp)
 		return io_u_accept;
 
+	assert(is_valid_zone_ptr(f, zb));
 	pthread_mutex_lock(&zb->mutex);
 	switch (io_u->ddir) {
 	case DDIR_READ:
@@ -932,19 +955,15 @@ enum io_u_action zbc_adjust_block(struct thread_data *td, struct io_u *io_u)
 			zb->reset_zone = 0;
 			assert(td->o.verify == VERIFY_NONE);
 			if (zbc_drain_queue(td) < 0)
-			{
 				goto eof;
-			}
-			if (zbc_reset_zone(td, f, zb) < 0) {
+			if (zbc_reset_zone(td, f, zb) < 0)
 				goto eof;
-			}
 			check_swd(td, f);
 			zone_idx_e = zbc_zone_idx(f, (zb->wp << 9) +
 						  io_u->buflen - 1);
 			assert(zone_idx_b <= zone_idx_e);
 		}
 		/* Make writes occur at the write pointer */
-
 		assert(!zbc_zone_full(f, zb));
 		io_u->offset = zb->wp << 9;
 		if (!is_valid_offset(f, io_u->offset)) {
@@ -954,26 +973,27 @@ enum io_u_action zbc_adjust_block(struct thread_data *td, struct io_u *io_u)
 		}
 		/*
 		 * Shrink write requests that exceed the zone size and make
-		 * sure that the new size is a multiple of the minimal block
-		 * size. Give up if the minimal block size exceeds the zone
-		 * size.
+		 * sure that the new end offset is a multiple of the minimal
+		 * block size (see also the rounding down code in
+		 * mark_random_map()). Give up if shrinking would make the
+		 * request too small.
 		 */
-		if (zone_idx_b != zone_idx_e) {
-			new_len = (((zb + 1)->start << 9) - io_u->offset) /
-				min_bs * min_bs;
-			if (new_len >= min_bs) {
-				io_u->buflen = new_len;
-				dprint(FD_IO,
-				       "Changed length from %u into %lu\n",
-				       orig_len, io_u->buflen);
-				goto accept;
-			}
-			log_err("Zone remainder %lld smaller than minimum block size %d\n",
-				(((zb + 1)->start << 9) - io_u->offset),
-				min_bs);
-			goto eof;
+		new_end = min((uint64_t)(io_u->offset + io_u->buflen),
+			      (zb + 1)->start << 9);
+		new_end = new_end / min_bs * min_bs;
+		assert(new_end <= io_u->offset + io_u->buflen);
+		if (new_end == io_u->offset + io_u->buflen)
+			goto accept;
+		if (io_u->offset < new_end) {
+			io_u->buflen = new_end - io_u->offset;
+			dprint(FD_IO, "Changed length from %u into %lu\n",
+			       orig_len, io_u->buflen);
+			goto accept;
 		}
-		goto accept;
+		log_err("Zone remainder %lld smaller than minimum block size %d\n",
+			(((zb + 1)->start << 9) - io_u->offset),
+			min_bs);
+		goto eof;
 	case DDIR_TRIM:
 		/* fall-through */
 	case DDIR_SYNC:
@@ -988,6 +1008,7 @@ enum io_u_action zbc_adjust_block(struct thread_data *td, struct io_u *io_u)
 	assert(false);
 
 accept:
+	assert(!io_u->post_submit);
 	io_u->post_submit = zbc_post_submit;
 	return io_u_accept;
 

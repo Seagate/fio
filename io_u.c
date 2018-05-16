@@ -1343,6 +1343,11 @@ static long set_io_u_file(struct thread_data *td, struct io_u *io_u)
 		if (!fill_io_u(td, io_u))
 			break;
 
+		if (io_u->post_submit) {
+			io_u->post_submit(io_u, FIO_Q_BUSY);
+			io_u->post_submit = NULL;
+		}
+
 		put_file_log(td, f);
 		td_io_close_file(td, f);
 		io_u->file = NULL;

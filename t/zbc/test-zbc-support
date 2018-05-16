@@ -416,8 +416,9 @@ test28() {
     check_written $((jobs * zone_size)) || return $?
 }
 
+# Run fio against an empty zone. This causes fio to report "No I/O performed".
 test29() {
-    local i off opts=()
+    local off opts=()
 
     off=$((first_sequential_zone_sector * 512 + 128 * zone_size))
     size=$((zone_size))
@@ -429,12 +430,52 @@ test29() {
     grep -q "No I/O performed" "${logfile}.${test_number}" || return $?
 }
 
+# Random reads across all sequential zones. This is not only a fio test but
+# also allows to verify the performance of a drive.
+test30() {
+    local bs inc nz off opts size
+
+    # Start with writing 128 KB to 128 sequential zones.
+    bs=128K
+    nz=128
+    inc=$(((disk_size - (first_sequential_zone_sector * 512)) / (nz * zone_size)
+	   * zone_size))
+    for ((off = first_sequential_zone_sector * 512; off < disk_size;
+	  off += inc)); do
+	opts=("--name=$dev" "--filename=$dev" "--offset=$off" "--size=$bs")
+	opts+=("--bs=$bs" "--ioengine=libaio" "--rw=write" "--direct=1")
+	opts+=("--thread=1")
+	"$(dirname "$0")/../../fio" "${opts[@]}" >/dev/null
+    done
+    # Next, run the test.
+    off=$((first_sequential_zone_sector * 512))
+    size=$((disk_size - off))
+    opts=("--name=$dev" "--filename=$dev" "--offset=$off" "--size=$size")
+    opts+=("--bs=$bs" "--ioengine=psync" "--rw=randread" "--direct=1")
+    opts+=("--thread=1" "--time_based" "--runtime=30")
+    run_fio "${opts[@]}" >> "${logfile}.${test_number}" 2>&1 || return $?
+}
+
+# Random writes across all sequential zones. This is not only a fio test but
+# also allows to verify the performance of a drive.
+test31() {
+    local off opts=() size
+
+    off=$((first_sequential_zone_sector * 512))
+    size=$((disk_size - off))
+    opts+=("--name=$dev" "--filename=$dev" "--offset=$off" "--size=$size")
+    opts+=("--bs=128K" "--ioengine=psync" "--rw=randwrite" "--direct=1")
+    opts+=("--thread=1" "--time_based" "--runtime=30")
+    opts+=("--max_open_zones=$max_open_zones")
+    run_fio "${opts[@]}" >> "${logfile}.${test_number}" 2>&1 || return $?
+}
+
 tests=()
 dynamic_analyzer=()
 
 while [ "${1#-}" != "$1" ]; do
   case "$1" in
-    -t) tests+=($2); shift; shift;;
+    -t) tests+=("$2"); shift; shift;;
     -v) dynamic_analyzer=(valgrind "--read-var-info=yes" "--leak-check=full");
 	shift;;
     -d) dynamic_analyzer=(valgrind "--read-var-info=yes" "--tool=drd"
@@ -468,12 +509,13 @@ result=($(first_sequential_zone "$dev")) || exit $?
 first_sequential_zone_sector=${result[0]}
 sectors_per_zone=${result[1]}
 zone_size=$((sectors_per_zone * 512))
+max_open_zones=$(max_open_zones "$dev") || exit 1
 echo "First sequential zone starts at sector $first_sequential_zone_sector; zone size: $((zone_size >> 20)) MB"
 
 set_io_scheduler "$basename" none || exit $?
 
 if [ "${#tests[@]}" = 0 ]; then
-    for ((i=1;i<=29;i++)); do
+    for ((i=1;i<=31;i++)); do
 	tests+=($i)
     done
 fi
