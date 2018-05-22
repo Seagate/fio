@@ -3327,6 +3327,16 @@ struct fio_option fio_options[FIO_MAX_OPTS] = {
 		.group	= FIO_OPT_G_ZONE,
 	},
 	{
+		.name	= "zbc_ignore",
+		.lname	= "ZBC Ignore",
+		.type	= FIO_OPT_BOOL,
+		.off1	= offsetof(struct thread_options, zbc_ignore),
+		.help	= "Do not align IO using ZBC zone table",
+		.def	= "0",
+		.category = FIO_OPT_C_IO,
+		.group	= FIO_OPT_G_IO_BASIC,
+	},
+	{
 		.name	= "skip_zone_resets",
 		.lname	= "Skip zone resets",
 		.type	= FIO_OPT_BOOL,

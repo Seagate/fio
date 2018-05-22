@@ -338,6 +338,9 @@ static int zbc_init_zone_info(struct thread_data *td, struct fio_file *file)
 	struct fio_file *f2;
 	int i, j;
 
+	if (td->o.zbc_ignore)
+		return 0;
+
 	for_each_td(td2, i) {
 		for_each_file(td2, f2, j) {
 			if (td2 == td && f2 == file)
@@ -870,7 +873,7 @@ enum io_u_action zbc_adjust_block(struct thread_data *td, struct io_u *io_u)
 	uint64_t new_end;
 	int64_t range;
 
-	if (!f->zbd_info)
+	if (!f->zbd_info || td->o.zbc_ignore)
 		return io_u_accept;
 
 	assert(is_valid_offset(f, io_u->offset));

@@ -329,6 +329,7 @@ struct thread_options {
 	fio_fp64_t zrt;
 	fio_fp64_t zrf;
 	unsigned int skip_zone_resets;
+	unsigned int zbc_ignore;
 #endif
 };
 
