@@ -10,6 +10,9 @@
 #include <inttypes.h>
 #include "fio.h"	/* FIO_MAX_OPEN_ZBC_ZONES */
 
+#define FLEX_ZONE_TYPE 4
+#define OFFLINE_ZONE_TYPE 0xFF
+
 struct fio_file;
 
 /*
@@ -76,9 +79,14 @@ struct zoned_block_device_info {
 	uint32_t		refcount;
 	uint32_t		num_open_zones;
 	uint32_t		write_cnt;
+	int				use_sg;
+	uint32_t		block_size;
 	uint32_t		open_zones[FIO_MAX_OPEN_ZBC_ZONES];
 	struct fio_zone_info	zone_info[0];
 };
+
+#define wp_zone(z)		((z->type == BLK_ZONE_TYPE_SEQWRITE_REQ) ||\
+                         (z->type == FLEX_ZONE_TYPE))
 
 #ifdef CONFIG_LINUX_BLKZONED
 void zbc_free_zone_info(struct fio_file *f);

@@ -908,17 +908,6 @@ get_io_u:
 		return 1;
 	else if (ret == io_u_retry)
 	{
-		/*
-		 * Retry is only returned when a write hits a full zone and
-		 * skip_resets is set. Nothing to do but return if this is
-		 * a sequential workload.
-		 */
-		if (!is_random) {
-			dprint(FD_ZBC, "Skip reset option set and sequential write "
-				   "encountered full zone at offset 0x%llx\n",
-				   (unsigned long long) io_u->offset);
-			return 1;
-		}
 		retries++;
 		if (retries > 1000) {
 			dprint(FD_ZBC, "Exiting random workload after picking %d write "
