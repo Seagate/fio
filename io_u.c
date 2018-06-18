@@ -49,7 +49,7 @@ static void mark_random_map(struct thread_data *td, struct io_u *io_u)
 		io_u->buflen = nr_blocks * min_bs;
 }
 
-static uint64_t last_block(struct thread_data *td, struct fio_file *f,
+uint64_t last_block(struct thread_data *td, const struct fio_file *f,
 			   enum fio_ddir ddir)
 {
 	uint64_t max_blocks;

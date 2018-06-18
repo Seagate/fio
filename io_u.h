@@ -148,6 +148,7 @@ extern void io_u_fill_buffer(struct thread_data *td, struct io_u *, unsigned int
 void io_u_mark_complete(struct thread_data *, unsigned int);
 void io_u_mark_submit(struct thread_data *, unsigned int);
 bool queue_full(const struct thread_data *);
+uint64_t last_block(struct thread_data *td, const struct fio_file *f, enum fio_ddir ddir);
 
 int do_io_u_sync(const struct thread_data *, struct io_u *);
 int do_io_u_trim(struct thread_data *, struct io_u *);

@@ -62,7 +62,7 @@ static bool os_is_little_endian() {
  * length from byte buffers
  */
 static void unpack_bytes(unsigned char* byte_buf, unsigned int num_bytes,
-				  bool little_endian, void* ret_var) {
+					bool little_endian, void* ret_var) {
 	int ind;
 	unsigned char* ret_bytes;
 	static bool need_init = true;
@@ -88,7 +88,7 @@ static void unpack_bytes(unsigned char* byte_buf, unsigned int num_bytes,
  * @data_buf: buffer to hold outgoing or incoming data
  * @bufsz: size of data_buf
  * @io_hdr_pt: pointer to io_hdr. Can be set to NULL or checked
- *             after running command for various information
+ *			after running command for various information
  */
 static int sg_send_cdb(int fd, unsigned char* cdb_buf, unsigned char cdb_len,
 				void *data_buf, unsigned int bufsz, sg_io_hdr_t* io_hdr_pt) {
@@ -353,9 +353,107 @@ static bool zbc_zone_full(const struct fio_file *f, struct fio_zone_info *z, con
 	return z->wp >= z->start + f->zbd_info->zone_size;
 }
 
-static bool is_valid_offset(const struct fio_file *f, uint64_t offset)
+static bool is_valid_offset(const struct fio_file *f, uint64_t offset,
+							struct thread_data* td, enum fio_ddir ddir)
 {
-	return (uint64_t)(offset - f->file_offset) < f->io_size;
+	int iter;
+	struct thread_options* o = &td->o;
+	uint64_t cur_size;
+	uint64_t lastb = last_block(td, f, ddir);
+	if (td_random(td) && ((o->random_distribution == FIO_RAND_DIST_ZONED_ABS) ||
+		(o->random_distribution == FIO_RAND_DIST_ZONED)))
+	{
+		for (iter = 0; iter < o->zone_split_nr[ddir]; iter++)
+		{
+			if (o->random_distribution == FIO_RAND_DIST_ZONED_ABS)
+				cur_size = o->zone_split[ddir][iter].size;
+			else
+				cur_size = (lastb * o->zone_split[ddir][iter].size_perc) / 100ULL;
+			if (o->zone_split[ddir][iter].access_perc > 0 &&
+				offset < cur_size)
+				return true;
+			offset -= cur_size;
+		}
+	}
+	else
+	{
+		return (uint64_t)(offset - f->file_offset) < f->io_size;
+	}
+	return false;
+}
+
+static void get_valid_offset(const struct fio_file *f, uint64_t* offset,
+							struct thread_data *td, enum fio_ddir ddir, bool forward)
+{
+	uint64_t valid_offset, wrap_offset, cur_offset, cur_size;
+	bool offset_found = false;
+	uint64_t lastb = last_block(td, f, ddir);
+	struct thread_options* o = &td->o;
+	int iter;
+	if (td_random(td) && ((o->random_distribution == FIO_RAND_DIST_ZONED_ABS) ||
+		(o->random_distribution == FIO_RAND_DIST_ZONED)))
+	{
+		cur_offset = 0;
+		valid_offset = 0;
+		if (forward)
+			wrap_offset = f->real_file_size;
+		else
+			wrap_offset = 0;
+		for (iter = 0; iter < o->zone_split_nr[ddir]; iter++)
+		{
+			if (o->random_distribution == FIO_RAND_DIST_ZONED_ABS)
+				cur_size = o->zone_split[ddir][iter].size;
+			else
+				cur_size = (lastb * o->zone_split[ddir][iter].size_perc) / 100ULL;
+			if (o->zone_split[ddir][iter].access_perc > 0)
+			{
+				// If the input offset is valid, we can just return
+				if (*offset >= cur_offset && *offset < cur_offset + cur_size)
+					return;
+				else if (cur_offset < *offset)
+				{
+					if (!forward)
+					{
+						offset_found = true;
+						valid_offset = cur_offset + cur_size - 1;
+					}
+					// Record the first valid offset in case we need to wrap
+					// forwards
+					else if (wrap_offset > cur_offset)
+						wrap_offset = cur_offset;
+				}
+				else if (cur_offset + cur_size >= *offset)
+				{
+					if (forward)
+					{
+						offset_found = true;
+						valid_offset = cur_offset;
+						break;
+					}
+					// Record the last valid offset in case we need to wrap
+					// backwards
+					else if (wrap_offset < cur_offset + cur_size - 1)
+						wrap_offset = cur_offset + cur_size - 1;
+				}
+			}
+			cur_offset += cur_size;
+			if (!forward && (cur_offset > *offset) && offset_found)
+				break;
+		}
+		// Use the wrap_offset if needed
+		if (offset_found)
+			*offset = valid_offset;
+		else
+			*offset = wrap_offset;
+	}
+	else if ((*offset < f->file_offset) ||
+		(*offset >= f->file_offset + f->io_size))
+	{
+		if (forward)
+			*offset = f->file_offset;
+		else
+			*offset = f->file_offset + f->io_size - 1;
+	}
 }
 
 static bool is_valid_zone_ptr(const struct fio_file *f,
@@ -575,8 +673,6 @@ int zbc_create_zone_info(struct fio_file *f)
 	int fd, i, use_sg, ret = 0;
 	void* aligned_ptr;
 
-
-
 	pthread_mutexattr_init(&attr);
 	pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
 	pthread_mutexattr_setpshared(&attr, true);
@@ -610,7 +706,7 @@ int zbc_create_zone_info(struct fio_file *f)
 	dprint(FD_ZBC, "Device %s has %d zones of size %lu KB\n", f->file_name,
 			nr_zones, zone_size / 2);
 	zbd_info = scalloc(1, sizeof(*zbd_info) +
-			   (nr_zones + 1) * sizeof(zbd_info->zone_info[0]));
+				(nr_zones + 1) * sizeof(zbd_info->zone_info[0]));
 	ret = -ENOMEM;
 	if (!zbd_info)
 		goto close;
@@ -768,7 +864,7 @@ int zbc_init(struct thread_data *td)
  * Returns 0 upon success and a negative error code upon failure.
  */
 static int zbc_reset_range(struct thread_data *td, const struct fio_file *f,
-			   uint64_t sector, uint64_t nr_sectors)
+				uint64_t sector, uint64_t nr_sectors)
 {
 	struct blk_zone_range zr = {
 		.sector         = sector,
@@ -779,7 +875,7 @@ static int zbc_reset_range(struct thread_data *td, const struct fio_file *f,
 	int ret;
 
 	assert(f->fd != -1);
-	assert(is_valid_offset(f, ((sector + nr_sectors) << 9) - 1));
+	assert(is_valid_offset(f, ((sector + nr_sectors) << 9) - 1, td, DDIR_WRITE));
 	if (f->zbd_info->use_sg)
 		ret = sg_reset_zones(f->fd, &zr, f->zbd_info->block_size,
 			f->zbd_info->zone_size);
@@ -821,19 +917,19 @@ static int zbc_reset_range(struct thread_data *td, const struct fio_file *f,
  * Returns 0 upon success and a negative error code upon failure.
  */
 static int zbc_reset_zone(struct thread_data *td, const struct fio_file *f,
-			  struct fio_zone_info *z)
+				struct fio_zone_info *z)
 {
 	int ret;
 
 	dprint(FD_ZBC, "%s: resetting wp of zone %lu.\n", f->file_name,
-		   z - f->zbd_info->zone_info);
+			z - f->zbd_info->zone_info);
 	ret = zbc_reset_range(td, f, z->start, (z+1)->start - z->start);
 	return ret;
 }
 
 /* Reset a range of zones. Returns 0 upon success and 1 upon failure. */
 static int zbc_reset_zones(struct thread_data *td, struct fio_file *f,
-			   struct fio_zone_info *zb, struct fio_zone_info *ze)
+				struct fio_zone_info *zb, struct fio_zone_info *ze)
 {
 	struct fio_zone_info *z, *start_z = ze;
 	int res = 0;
@@ -909,7 +1005,7 @@ static void check_swd(const struct thread_data *td, const struct fio_file *f)
 
 	zb = &f->zbd_info->zone_info[zbc_zone_idx(f, f->file_offset)];
 	ze = &f->zbd_info->zone_info[zbc_zone_idx(f, f->file_offset +
-						  f->io_size)];
+						f->io_size)];
 	swd = 0;
 	for (z = zb; z < ze; z++) {
 		assert(is_valid_zone_ptr(f, z));
@@ -981,7 +1077,7 @@ static bool is_zone_open(const struct thread_data *td, const struct fio_file *f,
  * exceeded.
  */
 static bool zbc_open_zone(struct thread_data *td, const struct fio_file *f,
-			  uint32_t zone_idx)
+				uint32_t zone_idx)
 {
 	bool res = true;
 
@@ -1005,7 +1101,7 @@ out:
 }
 
 static void zbc_close_zone(struct thread_data *td, const struct fio_file *f,
-			   unsigned int open_zone_idx)
+				unsigned int open_zone_idx)
 {
 	uint32_t zone_idx;
 
@@ -1036,8 +1132,9 @@ struct fio_zone_info *zbc_convert_to_open_zone(struct thread_data *td,
 	unsigned int open_zone_idx;
 	uint32_t zone_idx;
 	int i;
+	uint64_t next_offset;
 
-	assert(is_valid_offset(f, io_u->offset));
+	assert(is_valid_offset(f, io_u->offset, td, io_u->ddir));
 
 	pthread_mutex_lock(&f->zbd_info->mutex);
 	if (f->zbd_info->num_open_zones == 0) {
@@ -1064,11 +1161,13 @@ struct fio_zone_info *zbc_convert_to_open_zone(struct thread_data *td,
 		pthread_mutex_unlock(&z->mutex);
 		assert(is_valid_zone_ptr(f, z));
 		z++;
-		if (!is_valid_offset(f, z->start << 9)) {
+		next_offset = z->start << 9;
+		if (!is_valid_offset(f, next_offset, td, io_u->ddir)) {
+			get_valid_offset(f, &next_offset, td, io_u->ddir, true);
 			zone_idx = zbc_zone_idx(f, f->file_offset);
 			z = &f->zbd_info->zone_info[zone_idx];
 		}
-		assert(is_valid_offset(f, z->start << 9));
+		assert(is_valid_offset(f, z->start << 9, td, io_u->ddir));
 		assert(is_valid_zone_ptr(f, z));
 		pthread_mutex_lock(&z->mutex);
 		if (z->open || !wp_zone(z))
@@ -1114,7 +1213,7 @@ out:
 
 /* The caller must hold z->mutex. */
 static void zbc_replay_write_order(struct thread_data *td, struct io_u *io_u,
-				   struct fio_zone_info *z)
+					struct fio_zone_info *z)
 {
 	const struct fio_file *f = io_u->file;
 	uint32_t ba = td->o.ba[io_u->ddir];
@@ -1155,35 +1254,66 @@ zbc_find_zone(struct thread_data *td, struct io_u *io_u,
 {
 	const struct fio_file *f = io_u->file;
 	struct fio_zone_info *z1, *z2;
-	const struct fio_zone_info *const zf =
+	struct fio_zone_info* zf =
 		&f->zbd_info->zone_info[zbc_zone_idx(f, f->file_offset)];
+	uint64_t new_offset;
+
+	/*
+	 * Shouldn't call this for non random IO
+	 */
+	if(!td_random(td)) {
+		dprint(FD_ZBC, "%s: issued zbc_find_zone on non-random IO, exiting\n",
+				f->file_name);
+	}
 
 	/*
 	 * Skip to the nearest non-empty zone in case of random I/O.
 	 */
 	for (z1 = zb + 1, z2 = zb - 1; z1 < zl || z2 >= zf; z1++, z2--) {
+		// Move to the last offline zone (so that it increments
+		// into the next online zone) which should be held in
+		// the wp from when the zone table was initialized
+		if (z1->type == OFFLINE_ZONE_TYPE) {
+			// If the wp is 0, then there is no online zone after this
+			if (z1->wp == 0)
+				z1 = zl;
+			else {
+				z1 = &f->zbd_info->zone_info[zbc_zone_idx(f, z1->wp - 1)];
+			}
+		}
+		if (!is_valid_offset(f, z1->start << 9, td, io_u->ddir))
+		{
+			new_offset = z1->start;
+			get_valid_offset(f, &new_offset, td, io_u->ddir, true);
+			// If we wrap, there are no valid offsets past this one,
+			// so give up
+			if (new_offset < z1->start)
+				z1 = zl;
+			else
+				z1 = &f->zbd_info->zone_info[zbc_zone_idx(f, new_offset)];
+		}
 		if (z1 < zl) {
 			assert(is_valid_zone_ptr(f, z1));
-			// Move to the last offline zone (so that it increments
-			// into the next online zone) which should be held in
-			// the wp from when the zone table was initialized
-			if (z1->type == OFFLINE_ZONE_TYPE) {
-				// If the wp is 0, then there is no online zone after this
-				if (z1->wp == 0)
-					z1 = zl;
-				else {
-					z1 = &f->zbd_info->zone_info[zbc_zone_idx(f, z1->wp - 1)];
-				}
-				continue;
-			}
 			pthread_mutex_lock(&z1->mutex);
 			if (z1->start + (io_u->buflen >> 9) <= z1->wp)
 				return z1;
 			pthread_mutex_unlock(&z1->mutex);
-		} else if (!td_random(td)) {
-			break;
 		}
-		if (td_random(td) && z2 >= zf) {
+		if (!is_valid_offset(f, z2->start << 9, td, io_u->ddir))
+		{
+			new_offset = z2->start;
+			get_valid_offset(f, &new_offset, td, io_u->ddir, false);
+			// If we wrap, there are no valid offsets past this one,
+			// so give up
+			if (new_offset > z2->start)
+			{
+				z2 = zf;
+				z2--;
+			}
+			else
+				z2 = &f->zbd_info->zone_info[zbc_zone_idx(f, new_offset)];
+		}
+		if (z2 >= zf) {
 			assert(is_valid_zone_ptr(f, z2));
 			// No easy way to skip backwards, so just loop
 			// through all the offline zones for now
@@ -1273,7 +1403,7 @@ enum io_u_action zbc_adjust_block(struct thread_data *td, struct io_u *io_u)
 	if (!f->zbd_info)
 		return io_u_accept;
 
-	assert(is_valid_offset(f, io_u->offset));
+	assert(is_valid_offset(f, io_u->offset, td, io_u->ddir));
 	assert(io_u->buflen);
 	zone_idx_b = zbc_zone_idx(f, io_u->offset);
 	zb = &f->zbd_info->zone_info[zone_idx_b];
@@ -1380,15 +1510,15 @@ enum io_u_action zbc_adjust_block(struct thread_data *td, struct io_u *io_u)
 				goto eof;
 			check_swd(td, f);
 			zone_idx_e = zbc_zone_idx(f, (zb->wp << 9) +
-						  io_u->buflen - 1);
+						io_u->buflen - 1);
 			assert(zone_idx_b <= zone_idx_e);
 		}
 		/* Make writes occur at the write pointer */
 		assert(!zbc_zone_full(f, zb, io_u));
 		io_u->offset = zb->wp << 9;
-		if (!is_valid_offset(f, io_u->offset)) {
+		if (!is_valid_offset(f, io_u->offset, td, io_u->ddir)) {
 			dprint(FD_IO, "Dropped request with offset %llu\n",
-				   io_u->offset);
+					io_u->offset);
 			goto eof;
 		}
 		/*
@@ -1399,7 +1529,7 @@ enum io_u_action zbc_adjust_block(struct thread_data *td, struct io_u *io_u)
 		 * request too small.
 		 */
 		new_end = min((uint64_t)(io_u->offset + io_u->buflen),
-				  (zb + 1)->start << 9);
+					(zb + 1)->start << 9);
 		new_end = new_end / min_bs * min_bs;
 		assert(new_end <= io_u->offset + io_u->buflen);
 		if (new_end == io_u->offset + io_u->buflen)
@@ -1407,7 +1537,7 @@ enum io_u_action zbc_adjust_block(struct thread_data *td, struct io_u *io_u)
 		if (io_u->offset < new_end) {
 			io_u->buflen = new_end - io_u->offset;
 			dprint(FD_IO, "Changed length from %u into %lu\n",
-				   orig_len, io_u->buflen);
+				orig_len, io_u->buflen);
 			goto accept;
 		}
 		log_err("Zone remainder %lld smaller than minimum block size %d\n",
