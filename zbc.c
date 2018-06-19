@@ -27,7 +27,9 @@
 #include "zbc.h"
 
 #define RZ_CMD_CODE 0x4A
+#define SCSI_RZ_CMD_CODE 0x95
 #define REZ_CMD_CODE 0x9F
+#define SCSI_REZ_CMD_CODE 0x94
 #define RC16_CMD_CODE 0x9E
 #define PT_PROTOCOL_DMA 0x0D	// DMA protocol and Extend bit
 #define PT_PROTOCOL_ND 0x07	// Non-data and Extend bit
@@ -135,7 +137,7 @@ static int sg_send_cdb(int fd, unsigned char* cdb_buf, unsigned char cdb_len,
  * @fd: file descriptor
  * @block_size: returned block size
  */
-static int sg_read_capacity(int fd, uint32_t* block_size)
+int sg_read_capacity(int fd, uint32_t* block_size, uint64_t* capacity)
 {
 	unsigned char rcCmdBlk[16];
 	unsigned char retBuf[4096];
@@ -163,6 +165,10 @@ static int sg_read_capacity(int fd, uint32_t* block_size)
 		return ret;
 
 	unpack_bytes(&retBuf[8], 4, false, block_size);
+	if (capacity != NULL) {
+		unpack_bytes(&retBuf[0], 8, false, capacity);
+		*capacity *= *block_size;
+	}
 	return 0;
 }
 
@@ -172,36 +178,69 @@ static int sg_read_capacity(int fd, uint32_t* block_size)
  * @start_sector: first sector to report zones from
  * @buf: buffer to hold return data in
  * @bufsz: size of buf
+ * @use_scsi: whether to use SCSI report zones or pass through ATA command
+ *				SCSI command might be usable for both, depending on sat4
+ *				layer
  */
-static int sg_report_zones(int fd, uint64_t start_lba, void *buf, unsigned int bufsz) {
+static int sg_report_zones(int fd, uint64_t start_lba, void *buf,
+							unsigned int bufsz, bool use_scsi) {
 	uint8_t reporting_options = 0;
 	uint16_t sector_count;
 	unsigned char rzCmdBlk[PT_CMD_LEN];
 
-	sector_count = bufsz / 512;  // This count is always in 512 blocks as per specification
+	if (use_scsi) {
+		rzCmdBlk[0] = SCSI_RZ_CMD_CODE;
+		rzCmdBlk[1] = 0;
+		rzCmdBlk[2] = (start_lba >> 56) & 0xFF;
+		rzCmdBlk[3] = (start_lba >> 48) & 0xFF;
+		rzCmdBlk[4] = (start_lba >> 40) & 0xFF;
+		rzCmdBlk[5] = (start_lba >> 32) & 0xFF;
+		rzCmdBlk[6] = (start_lba >> 24) & 0xFF;
+		rzCmdBlk[7] = (start_lba >> 16) & 0xFF;
+		rzCmdBlk[8] = (start_lba >> 8) & 0xFF;
+		rzCmdBlk[9] = start_lba & 0xFF;
+		rzCmdBlk[10] = (bufsz >> 24) & 0xFF;
+		rzCmdBlk[11] = (bufsz >> 16) & 0xFF;
+		rzCmdBlk[12] = (bufsz >> 8) & 0xFF;
+		rzCmdBlk[13] = bufsz & 0xFF;
+		rzCmdBlk[14] = reporting_options;
+		rzCmdBlk[15] = 0;
+	}
+	else {
+		sector_count = bufsz / 512;  // This count is always in 512 blocks as per specification
 
-	rzCmdBlk[0] = PT_CMD_CODE;
-	rzCmdBlk[1] = PT_PROTOCOL_DMA;
-	rzCmdBlk[2] = MISC_BYTE;
-	rzCmdBlk[3] = (unsigned char) reporting_options;
-	rzCmdBlk[4] = 0;
-	rzCmdBlk[5] = (unsigned char) (sector_count >> 8) & 0xFF;
-	rzCmdBlk[6] = (unsigned char) sector_count & 0xFF;
-	rzCmdBlk[7] = (unsigned char) (start_lba >> 24) & 0xFF;
-	rzCmdBlk[8] = (unsigned char) start_lba & 0xFF;
-	rzCmdBlk[9] = (unsigned char) (start_lba >> 32) & 0xFF;
-	rzCmdBlk[10] = (unsigned char) (start_lba >> 8) & 0xFF;
-	rzCmdBlk[11] = (unsigned char) (start_lba >> 40) & 0xFF;
-	rzCmdBlk[12] = (unsigned char) (start_lba >> 16) & 0xFF;
-	rzCmdBlk[13] = 0;
-	rzCmdBlk[14] = RZ_CMD_CODE;
-	rzCmdBlk[15] = 0;
+		rzCmdBlk[0] = PT_CMD_CODE;
+		rzCmdBlk[1] = PT_PROTOCOL_DMA;
+		rzCmdBlk[2] = MISC_BYTE;
+		rzCmdBlk[3] = (unsigned char) reporting_options;
+		rzCmdBlk[4] = 0;
+		rzCmdBlk[5] = (unsigned char) (sector_count >> 8) & 0xFF;
+		rzCmdBlk[6] = (unsigned char) sector_count & 0xFF;
+		rzCmdBlk[7] = (unsigned char) (start_lba >> 24) & 0xFF;
+		rzCmdBlk[8] = (unsigned char) start_lba & 0xFF;
+		rzCmdBlk[9] = (unsigned char) (start_lba >> 32) & 0xFF;
+		rzCmdBlk[10] = (unsigned char) (start_lba >> 8) & 0xFF;
+		rzCmdBlk[11] = (unsigned char) (start_lba >> 40) & 0xFF;
+		rzCmdBlk[12] = (unsigned char) (start_lba >> 16) & 0xFF;
+		rzCmdBlk[13] = 0;
+		rzCmdBlk[14] = RZ_CMD_CODE;
+		rzCmdBlk[15] = 0;
+	}
 
 	return sg_send_cdb(fd, rzCmdBlk, PT_CMD_LEN, buf, bufsz, NULL);
 }
 
+/**
+ * sg_reset_zones - reset all zones specified by zr parameter
+ * @fd: file descriptor
+ * @zr: start and number of zones to reset
+ * @block_size: logical block size of device in bytes -- used to convert
+ *				sectors from zr into LBAs
+ * @zone_size: sectors per zone
+ * @use_scsi: whether to use the SCSI or the ATA command
+ */
 static int sg_reset_zones(int fd, struct blk_zone_range* zr, uint32_t block_size,
-		uint64_t zone_size) {
+		uint64_t zone_size, bool use_scsi) {
 	uint8_t sub_cmd = 4;
 	unsigned char rez_cmd_blk[PT_CMD_LEN];
 	uint16_t sec_per_lba = block_size / 512;
@@ -212,34 +251,65 @@ static int sg_reset_zones(int fd, struct blk_zone_range* zr, uint32_t block_size
 	cur_lba = zr->sector / sec_per_lba;
 	last_lba = cur_lba + (zr->nr_sectors / sec_per_lba);
 
-	rez_cmd_blk[0] = PT_CMD_CODE;
-	rez_cmd_blk[1] = PT_PROTOCOL_ND;
-	// Non-data command doesn't need to use this byte
-	rez_cmd_blk[2] = 0;
-	// Features high used for resetting all zones
-	rez_cmd_blk[3] = 0;
-	// Features low used for sub command
-	rez_cmd_blk[4] = sub_cmd;
-	// This might be usable for multiple sectors, but can't count on it
-	// for now
-	rez_cmd_blk[5] = 0;
-	rez_cmd_blk[6] = 0;
-	// Unused device byte
-	rez_cmd_blk[13] = 0;
-	rez_cmd_blk[14] = REZ_CMD_CODE;
-	rez_cmd_blk[15] = 0;
-	while (cur_lba < last_lba) {
-		// Set LBAs
-		rez_cmd_blk[7] = (unsigned char) (cur_lba >> 24) & 0xFF;
-		rez_cmd_blk[8] = (unsigned char) cur_lba & 0xFF;
-		rez_cmd_blk[9] = (unsigned char) (cur_lba >> 32) & 0xFF;
-		rez_cmd_blk[10] = (unsigned char) (cur_lba >> 8) & 0xFF;
-		rez_cmd_blk[11] = (unsigned char) (cur_lba >> 40) & 0xFF;
-		rez_cmd_blk[12] = (unsigned char) (cur_lba >> 16) & 0xFF;
-		ret = sg_send_cdb(fd, rez_cmd_blk, PT_CMD_LEN, NULL, 0, NULL);
-		if (ret != 0)
-			return ret;
-		cur_lba += zone_size;
+	if (use_scsi) {
+		rez_cmd_blk[0] = SCSI_REZ_CMD_CODE;
+		// Service action
+		rez_cmd_blk[1] = 0x4;
+		// Reserved
+		rez_cmd_blk[10] = 0;
+		rez_cmd_blk[11] = 0;
+		// Sector size -- for now this seems to abort if 0 is not sent
+		rez_cmd_blk[12] = 0;
+		rez_cmd_blk[13] = 0;
+		// Reset all can be set here
+		rez_cmd_blk[14] = 0;
+		rez_cmd_blk[15] = 0;
+		while (cur_lba < last_lba) {
+			// Set LBAs
+			rez_cmd_blk[2] = (unsigned char) (cur_lba >> 56) & 0xFF;
+			rez_cmd_blk[3] = (unsigned char) (cur_lba >> 48) & 0xFF;
+			rez_cmd_blk[4] = (unsigned char) (cur_lba >> 40) & 0xFF;
+			rez_cmd_blk[5] = (unsigned char) (cur_lba >> 32) & 0xFF;
+			rez_cmd_blk[6] = (unsigned char) (cur_lba >> 24) & 0xFF;
+			rez_cmd_blk[7] = (unsigned char) (cur_lba >> 16) & 0xFF;
+			rez_cmd_blk[8] = (unsigned char) (cur_lba >> 8) & 0xFF;
+			rez_cmd_blk[9] = (unsigned char) cur_lba & 0xFF;
+			ret = sg_send_cdb(fd, rez_cmd_blk, PT_CMD_LEN, NULL, 0, NULL);
+			if (ret != 0)
+				return ret;
+			cur_lba += zone_size;
+		}
+	}
+	else {
+		rez_cmd_blk[0] = PT_CMD_CODE;
+		rez_cmd_blk[1] = PT_PROTOCOL_ND;
+		// Non-data command doesn't need to use this byte
+		rez_cmd_blk[2] = 0;
+		// Features high used for resetting all zones
+		rez_cmd_blk[3] = 0;
+		// Features low used for sub command
+		rez_cmd_blk[4] = sub_cmd;
+		// This might be usable for multiple sectors, but can't count on it
+		// for now
+		rez_cmd_blk[5] = 0;
+		rez_cmd_blk[6] = 0;
+		// Unused device byte
+		rez_cmd_blk[13] = 0;
+		rez_cmd_blk[14] = REZ_CMD_CODE;
+		rez_cmd_blk[15] = 0;
+		while (cur_lba < last_lba) {
+			// Set LBAs
+			rez_cmd_blk[7] = (unsigned char) (cur_lba >> 24) & 0xFF;
+			rez_cmd_blk[8] = (unsigned char) cur_lba & 0xFF;
+			rez_cmd_blk[9] = (unsigned char) (cur_lba >> 32) & 0xFF;
+			rez_cmd_blk[10] = (unsigned char) (cur_lba >> 8) & 0xFF;
+			rez_cmd_blk[11] = (unsigned char) (cur_lba >> 40) & 0xFF;
+			rez_cmd_blk[12] = (unsigned char) (cur_lba >> 16) & 0xFF;
+			ret = sg_send_cdb(fd, rez_cmd_blk, PT_CMD_LEN, NULL, 0, NULL);
+			if (ret != 0)
+				return ret;
+			cur_lba += zone_size;
+		}
 	}
 
 	return ret;
@@ -253,7 +323,8 @@ static int sg_reset_zones(int fd, struct blk_zone_range* zr, uint32_t block_size
  * @bufsz: size of buffer written into by sg_report_zones
  * @secPerLba: number of linux 512 sectors per reported LBA
  */
-static int parse_to_structs(unsigned char* buf, unsigned int bufsz, unsigned int secPerLba) {
+static int parse_to_structs(unsigned char* buf, unsigned int bufsz,
+	                        unsigned int secPerLba, bool use_scsi) {
 	uint32_t num_zones;
 	uint8_t zone_type;
 	uint8_t zone_cond;
@@ -276,7 +347,7 @@ static int parse_to_structs(unsigned char* buf, unsigned int bufsz, unsigned int
 		return 1;
 	}
 	// Parse the header first
-	unpack_bytes(buf, 4, true, &num_zones);
+	unpack_bytes(buf, 4, !use_scsi, &num_zones);
 	num_zones = num_zones / ZONE_INFO_SIZE;
 
 
@@ -296,9 +367,9 @@ static int parse_to_structs(unsigned char* buf, unsigned int bufsz, unsigned int
 		cur_zone = &buf[data_offset];
 		zone_type = cur_zone[0] & 0xF;
 		zone_cond = cur_zone[1] >> 4;
-		unpack_bytes(&cur_zone[8], 8, true, &zone_size);
-		unpack_bytes(&cur_zone[16], 8, true, &zone_start);
-		unpack_bytes(&cur_zone[24], 8, true, &write_pointer);
+		unpack_bytes(&cur_zone[8], 8, !use_scsi, &zone_size);
+		unpack_bytes(&cur_zone[16], 8, !use_scsi, &zone_start);
+		unpack_bytes(&cur_zone[24], 8, !use_scsi, &write_pointer);
 		// If too many zones are requested, command will zero pad
 		if (zone_size == 0) {
 			break;
@@ -542,6 +613,7 @@ static int read_zone_info(int fd, int* use_sg_rz, uint32_t* block_size,
 	int ret = -1;
 	uint64_t start_lba;
 	int retry;
+	bool use_scsi;
 
 	if (bufsz < sizeof(*hdr))
 		return -EINVAL;
@@ -553,6 +625,9 @@ static int read_zone_info(int fd, int* use_sg_rz, uint32_t* block_size,
 		hdr->sector = start_sector;
 		for (retry = 0; retry < 10; retry++) {
 			ret = ioctl(fd, BLKREPORTZONE, hdr);
+			// Doublecheck the returned header returned a non-zero number of zones
+			if (ret == 0 && hdr->nr_zones == 0)
+				ret = -1;
 			if (ret == 0) {
 				*use_sg_rz = 0;
 				break;
@@ -563,28 +638,34 @@ static int read_zone_info(int fd, int* use_sg_rz, uint32_t* block_size,
 	// Try issuing the sg_report_zones instead
 	if (ret != 0 || *use_sg_rz != 0) {
 		if (*block_size < 512) {
-			ret = sg_read_capacity(fd, block_size);
+			ret = sg_read_capacity(fd, block_size, NULL);
 			if (ret != 0) {
 				log_info("failed to read capacity with return %d\n", ret);
 				*block_size = 0;
 				return ret;
 			}
 		}
+		// Round the bufsz to an even multiple of the block size
 		bufsz = (bufsz / *block_size) * (*block_size);
-		start_lba = start_sector * (*block_size / 512);
+		start_lba = (start_sector * 512) / (*block_size);
+		use_scsi = (*use_sg_rz == 2) || (*use_sg_rz == -1);
 		for (retry = 0; retry < 10; retry++) {
-			ret = sg_report_zones(fd, start_lba, buf, bufsz);
+			ret = sg_report_zones(fd, start_lba, buf, bufsz, use_scsi);
 			if (ret != -1) {
 				break;
 			}
+			if (*use_sg_rz == -1)
+				use_scsi = !use_scsi;
 		}
 		if (ret != 0) {
 			log_info("failed to report zones with return %d\n", ret);
 			return ret;
 		}
+		else if (use_scsi)
+			*use_sg_rz = 2;
 		else
 			*use_sg_rz = 1;
-		ret = parse_to_structs(buf, bufsz, *block_size / 512);
+		ret = parse_to_structs(buf, bufsz, *block_size / 512, use_scsi);
 		if (ret != 0) {
 			log_info("failed to parse to structs with return %d\n", ret);
 		}
@@ -690,6 +771,7 @@ int zbc_create_zone_info(struct fio_file *f)
 	aligned_ptr = PTR_ALIGN(buf, page_mask);
 	use_sg = -1;
 	block_size = 0;
+	memset(aligned_ptr, 0x77, 16);
 	ret = read_zone_info(fd, &use_sg, &block_size, 0, aligned_ptr, bufsz);
 	if (ret != 0)
 		goto check_ret;
@@ -817,9 +899,6 @@ static int zbc_init_zone_info(struct thread_data *td, struct fio_file *file)
 	struct fio_file *f2;
 	int i, j;
 
-	if (td->o.zbc_ignore)
-		return 0;
-
 	for_each_td(td2, i) {
 		for_each_file(td2, f2, j) {
 			if (td2 == td && f2 == file)
@@ -881,7 +960,7 @@ static int zbc_reset_range(struct thread_data *td, const struct fio_file *f,
 	assert(is_valid_offset(f, ((sector + nr_sectors) << 9) - 1, td, DDIR_WRITE));
 	if (f->zbd_info->use_sg)
 		ret = sg_reset_zones(f->fd, &zr, f->zbd_info->block_size,
-			f->zbd_info->zone_size);
+			f->zbd_info->zone_size, f->zbd_info->use_sg == 2);
 	else
 		ret = ioctl(f->fd, BLKRESETZONE, &zr);
 	if (ret < 0) {
@@ -1403,7 +1482,7 @@ enum io_u_action zbc_adjust_block(struct thread_data *td, struct io_u *io_u)
 	int64_t range;
 	int ret;
 
-	if (!f->zbd_info || td->o.zbc_ignore)
+	if (!f->zbd_info)
 		return io_u_accept;
 
 	assert(is_valid_offset(f, io_u->offset, td, io_u->ddir));
