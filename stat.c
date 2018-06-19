@@ -14,7 +14,7 @@
 #include "lib/output_buffer.h"
 #include "helper_thread.h"
 #include "smalloc.h"
-#include "zbc.h"
+#include "zbd.h"
 
 #define LOG_MSEC_SLACK	1
 

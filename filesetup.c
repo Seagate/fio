@@ -14,7 +14,7 @@
 #include "hash.h"
 #include "lib/axmap.h"
 #include "rwlock.h"
-#include "zbc.h"
+#include "zbd.h"
 
 #ifdef CONFIG_LINUX_FALLOCATE
 #include <linux/falloc.h>

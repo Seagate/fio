@@ -47,7 +47,7 @@
 #include "rate-submit.h"
 #include "helper_thread.h"
 #include "pshared.h"
-#include "zbc.h"
+#include "zbd.h"
 
 static struct fio_sem *startup_sem;
 static struct flist_head *cgroup_list;

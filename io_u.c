@@ -10,7 +10,7 @@
 #include "err.h"
 #include "lib/pow2.h"
 #include "minmax.h"
-#include "zbc.h"
+#include "zbd.h"
 
 struct io_completion_data {
 	int nr;				/* input */

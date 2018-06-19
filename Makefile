@@ -143,7 +143,7 @@ ifdef CONFIG_LIBPMEM
   SOURCE += engines/libpmem.c
 endif
 ifdef CONFIG_LINUX_BLKZONED
-  SOURCE += zbc.c
+  SOURCE += zbd.c
 endif
 
 ifeq ($(CONFIG_TARGET_OS), Linux)

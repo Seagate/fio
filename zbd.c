@@ -24,7 +24,7 @@
 #include "log.h"
 #include "smalloc.h"
 #include "verify.h"
-#include "zbc.h"
+#include "zbd.h"
 
 #define RZ_CMD_CODE 0x4A
 #define SCSI_RZ_CMD_CODE 0x95
