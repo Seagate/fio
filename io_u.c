@@ -169,7 +169,7 @@ bail:
 	/*
 	 * Generate a value, v, between 1 and 100, both inclusive
 	 */
-	v = rand32_between(&td->zone_state, 1, 100);
+	v = rand_between(&td->zone_state, 1, 100);
 
 	/*
 	 * Find our generated table. 'send' is the end block of this zone,
@@ -226,7 +226,7 @@ bail:
 	/*
 	 * Generate a value, v, between 1 and 100, both inclusive
 	 */
-	v = rand32_between(&td->zone_state, 1, 100);
+	v = rand_between(&td->zone_state, 1, 100);
 
 	zsi = &td->zone_state_index[ddir][v - 1];
 	stotal = zsi->size_perc_prev;
@@ -301,7 +301,7 @@ static bool should_do_random(struct thread_data *td, enum fio_ddir ddir)
 	if (td->o.perc_rand[ddir] == 100)
 		return true;
 
-	v = rand32_between(&td->seq_rand_state[ddir], 1, 100);
+	v = rand_between(&td->seq_rand_state[ddir], 1, 100);
 
 	return v <= td->o.perc_rand[ddir];
 }
@@ -326,9 +326,9 @@ static int get_next_rand_block(struct thread_data *td, struct fio_file *f,
 	if (td->o.time_based ||
 	    (td->o.file_service_type & __FIO_FSERVICE_NONUNIFORM)) {
 		fio_file_reset(td, f);
+		loop_cache_invalidate(td, f);
 		if (!get_next_rand_offset(td, f, ddir, b))
 			return 0;
-		loop_cache_invalidate(td, f);
 	}
 
 	dprint(FD_IO, "%s: rand offset failed, last=%llu, size=%llu\n",
@@ -590,7 +590,7 @@ static inline enum fio_ddir get_rand_ddir(struct thread_data *td)
 {
 	unsigned int v;
 
-	v = rand32_between(&td->rwmix_state, 1, 100);
+	v = rand_between(&td->rwmix_state, 1, 100);
 
 	if (v <= td->o.rwmix[DDIR_READ])
 		return DDIR_READ;
@@ -765,7 +765,7 @@ void put_file_log(struct thread_data *td, struct fio_file *f)
 void put_io_u(struct thread_data *td, struct io_u *io_u)
 {
 	if (io_u->post_submit) {
-		io_u->post_submit(io_u, FIO_Q_BUSY);
+		io_u->post_submit(io_u, io_u->error == 0);
 		io_u->post_submit = NULL;
 	}
 
@@ -903,14 +903,14 @@ get_io_u:
 		return 1;
 	}
 
-	ret = zbc_adjust_block(td, io_u);
+	ret = zbd_adjust_block(td, io_u);
 	if (ret == io_u_eof)
 		return 1;
 	else if (ret == io_u_retry)
 	{
 		retries++;
 		if (retries > 1000) {
-			dprint(FD_ZBC, "Exiting random workload after picking %d write "
+			dprint(FD_ZBD, "Exiting random workload after picking %d write "
 				   "offsets with skip reset option set (offset 0x%llx)\n",
 				   retries,
 				   (unsigned long long) io_u->offset);
@@ -1333,7 +1333,7 @@ static long set_io_u_file(struct thread_data *td, struct io_u *io_u)
 			break;
 
 		if (io_u->post_submit) {
-			io_u->post_submit(io_u, FIO_Q_BUSY);
+			io_u->post_submit(io_u, false);
 			io_u->post_submit = NULL;
 		}
 
@@ -2103,7 +2103,7 @@ static struct frand_state *get_buf_state(struct thread_data *td)
 		return &td->buf_state;
 	}
 
-	v = rand32_between(&td->dedupe_state, 1, 100);
+	v = rand_between(&td->dedupe_state, 1, 100);
 
 	if (v <= td->o.dedupe_percentage)
 		return &td->buf_state_prev;
@@ -2222,7 +2222,7 @@ int do_io_u_trim(struct thread_data *td, struct io_u *io_u)
 	struct fio_file *f = io_u->file;
 	int ret;
 
-	if (zbc_do_trim(td, io_u) == 0)
+	if (zbd_do_trim(td, io_u) == 0)
 		return io_u->xfer_buflen;
 
 	ret = os_trim(f, io_u->offset, io_u->xfer_buflen);

@@ -574,23 +574,6 @@ static int fixed_block_size(struct thread_options *o)
 		o->min_bs[DDIR_READ] == o->min_bs[DDIR_TRIM];
 }
 
-
-static unsigned long long get_rand_start_delay(struct thread_data *td)
-{
-	unsigned long long delayrange;
-	uint64_t frand_max;
-	unsigned long r;
-
-	delayrange = td->o.start_delay_high - td->o.start_delay;
-
-	frand_max = rand_max(&td->delay_state);
-	r = __rand(&td->delay_state);
-	delayrange = (unsigned long long) ((double) delayrange * (r / (frand_max + 1.0)));
-
-	delayrange += td->o.start_delay;
-	return delayrange;
-}
-
 /*
  * <3 Johannes
  */
@@ -685,8 +668,13 @@ static int fixup_options(struct thread_data *td)
 	if (!o->file_size_high)
 		o->file_size_high = o->file_size_low;
 
-	if (o->start_delay_high)
-		o->start_delay = get_rand_start_delay(td);
+	if (o->start_delay_high) {
+		if (!o->start_delay_orig)
+			o->start_delay_orig = o->start_delay;
+		o->start_delay = rand_between(&td->delay_state,
+						o->start_delay_orig,
+						o->start_delay_high);
+	}
 
 	if (o->norandommap && o->verify != VERIFY_NONE
 	    && !fixed_block_size(o))  {
@@ -1456,6 +1444,11 @@ static int add_job(struct thread_data *td, const char *jobname, int job_add_num,
 		}
 	}
 
+	if (setup_random_seeds(td)) {
+		td_verror(td, errno, "setup_random_seeds");
+		goto err;
+	}
+
 	if (fixup_options(td))
 		goto err;
 
@@ -1512,11 +1505,6 @@ static int add_job(struct thread_data *td, const char *jobname, int job_add_num,
 
 	td->groupid = groupid;
 	prev_group_jobs++;
-
-	if (setup_random_seeds(td)) {
-		td_verror(td, errno, "setup_random_seeds");
-		goto err;
-	}
 
 	if (setup_rate(td))
 		goto err;
@@ -2270,9 +2258,9 @@ const struct debug_level debug_levels[] = {
 	  .help = "Helper thread logging",
 	  .shift = FD_HELPERTHREAD,
 	},
-	{ .name = "zbc",
+	{ .name = "zbd",
 	  .help = "Zoned Block Device logging",
-	  .shift = FD_ZBC,
+	  .shift = FD_ZBD,
 	},
 	{ .name = NULL, },
 };

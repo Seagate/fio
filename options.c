@@ -57,8 +57,7 @@ struct split {
 };
 
 static int split_parse_ddir(struct thread_options *o, struct split *split,
-			    enum fio_ddir ddir, char *str, bool absolute,
-			    unsigned int max_splits)
+			    char *str, bool absolute, unsigned int max_splits)
 {
 	unsigned long long perc;
 	unsigned int i;
@@ -125,7 +124,7 @@ static int bssplit_ddir(struct thread_options *o, enum fio_ddir ddir, char *str,
 
 	memset(&split, 0, sizeof(split));
 
-	if (split_parse_ddir(o, &split, ddir, str, data, BSSPLIT_MAX))
+	if (split_parse_ddir(o, &split, str, data, BSSPLIT_MAX))
 		return 1;
 	if (!split.nr)
 		return 0;
@@ -882,7 +881,7 @@ static int zone_split_ddir(struct thread_options *o, enum fio_ddir ddir,
 
 	memset(&split, 0, sizeof(split));
 
-	if (split_parse_ddir(o, &split, ddir, str, absolute, ZONESPLIT_MAX))
+	if (split_parse_ddir(o, &split, str, absolute, ZONESPLIT_MAX))
 		return 1;
 	if (!split.nr)
 		return 0;
@@ -1047,8 +1046,6 @@ static int parse_zoned_distribution(struct thread_data *td, const char *input,
 	}
 
 	if (parse_dryrun()) {
-		int i;
-
 		for (i = 0; i < DDIR_RWDIR_CNT; i++) {
 			free(td->o.zone_split[i]);
 			td->o.zone_split[i] = NULL;
@@ -3295,7 +3292,7 @@ struct fio_option fio_options[FIO_MAX_OPTS] = {
 		.lname	= "Maximum number of open zones",
 		.type	= FIO_OPT_INT,
 		.off1	= offsetof(struct thread_options, max_open_zones),
-		.maxval	= FIO_MAX_OPEN_ZBC_ZONES,
+		.maxval	= FIO_MAX_OPEN_ZBD_ZONES,
 		.help	= "Limit random writes to SMR drives to the specified"
 			  " number of sequential zones",
 		.def	= "0",
@@ -5235,8 +5232,7 @@ struct fio_option *fio_option_find(const char *name)
 	return find_option(fio_options, name);
 }
 
-static struct fio_option *find_next_opt(struct thread_options *o,
-					struct fio_option *from,
+static struct fio_option *find_next_opt(struct fio_option *from,
 					unsigned int off1)
 {
 	struct fio_option *opt;
@@ -5273,7 +5269,7 @@ bool __fio_option_is_set(struct thread_options *o, unsigned int off1)
 	struct fio_option *opt, *next;
 
 	next = NULL;
-	while ((opt = find_next_opt(o, next, off1)) != NULL) {
+	while ((opt = find_next_opt(next, off1)) != NULL) {
 		if (opt_is_set(o, opt))
 			return true;
 

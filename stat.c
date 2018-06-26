@@ -420,7 +420,7 @@ static void show_ddir_status(struct group_run_stats *rs, struct thread_stat *ts,
 	unsigned long runt;
 	unsigned long long min, max, bw, iops;
 	double mean, dev;
-	char *io_p, *bw_p, *bw_p_alt, *iops_p, *zbc_w_st = NULL;
+	char *io_p, *bw_p, *bw_p_alt, *iops_p, *zbd_w_st = NULL;
 	int i2p;
 
 	if (ddir_sync(ddir)) {
@@ -452,15 +452,15 @@ static void show_ddir_status(struct group_run_stats *rs, struct thread_stat *ts,
 	iops = (1000 * (uint64_t)ts->total_io_u[ddir]) / runt;
 	iops_p = num2str(iops, ts->sig_figs, 1, 0, N2S_NONE);
 	if (ddir == DDIR_WRITE)
-		zbc_w_st = zbc_write_status(rs);
+		zbd_w_st = zbd_write_status(ts);
 
 	log_buf(out, "  %s: IOPS=%s, BW=%s (%s)(%s/%llumsec)%s\n",
 			rs->unified_rw_rep ? "mixed" : str[ddir],
 			iops_p, bw_p, bw_p_alt, io_p,
 			(unsigned long long) ts->runtime[ddir],
-			zbc_w_st ? : "");
+			zbd_w_st ? : "");
 
-	free(zbc_w_st);
+	free(zbd_w_st);
 	free(io_p);
 	free(bw_p);
 	free(bw_p_alt);
@@ -1514,7 +1514,7 @@ static struct json_object *show_thread_status_json(struct thread_stat *ts,
 	if (ts->ss_dur) {
 		struct json_object *data;
 		struct json_array *iops, *bw;
-		int i, j, k;
+		int j, k, l;
 		char ss_buf[64];
 
 		snprintf(ss_buf, sizeof(ss_buf), "%s%s:%f%s",
@@ -1550,8 +1550,8 @@ static struct json_object *show_thread_status_json(struct thread_stat *ts,
 			j = ts->ss_head;
 		else
 			j = ts->ss_head == 0 ? ts->ss_dur - 1 : ts->ss_head - 1;
-		for (i = 0; i < ts->ss_dur; i++) {
-			k = (j + i) % ts->ss_dur;
+		for (l = 0; l < ts->ss_dur; l++) {
+			k = (j + l) % ts->ss_dur;
 			json_array_add_value_int(bw, ts->ss_bw_data[k]);
 			json_array_add_value_int(iops, ts->ss_iops_data[k]);
 		}
@@ -1748,6 +1748,7 @@ void sum_thread_stats(struct thread_stat *dst, struct thread_stat *src,
 	dst->total_run_time += src->total_run_time;
 	dst->total_submit += src->total_submit;
 	dst->total_complete += src->total_complete;
+	dst->nr_zone_resets += src->nr_zone_resets;
 }
 
 void init_group_run_stat(struct group_run_stats *gs)
@@ -2065,17 +2066,12 @@ void __show_run_stats(void)
 		buf_output_free(out);
 	}
 
+	fio_idle_prof_cleanup();
+
 	log_info_flush();
 	free(runstats);
 	free(threadstats);
 	free(opt_lists);
-}
-
-void show_run_stats(void)
-{
-	fio_sem_down(stat_sem);
-	__show_run_stats();
-	fio_sem_up(stat_sem);
 }
 
 void __show_running_run_stats(void)
@@ -2343,12 +2339,14 @@ static struct io_logs *get_cur_log(struct io_log *iolog)
 	 * submissions, flag 'td' as needing a log regrow and we'll take
 	 * care of it on the submission side.
 	 */
-	if (iolog->td->o.io_submit_mode == IO_MODE_OFFLOAD ||
+	if ((iolog->td && iolog->td->o.io_submit_mode == IO_MODE_OFFLOAD) ||
 	    !per_unit_log(iolog))
 		return regrow_log(iolog);
 
-	iolog->td->flags |= TD_F_REGROW_LOGS;
-	assert(iolog->pending->nr_samples < iolog->pending->max_samples);
+	if (iolog->td)
+		iolog->td->flags |= TD_F_REGROW_LOGS;
+	if (iolog->pending)
+		assert(iolog->pending->nr_samples < iolog->pending->max_samples);
 	return iolog->pending;
 }
 
@@ -2440,6 +2438,7 @@ void reset_io_stats(struct thread_data *td)
 
 	ts->total_submit = 0;
 	ts->total_complete = 0;
+	ts->nr_zone_resets = 0;
 }
 
 static void __add_stat_to_log(struct io_log *iolog, enum fio_ddir ddir,

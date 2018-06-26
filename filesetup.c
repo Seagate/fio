@@ -1162,7 +1162,7 @@ done:
 
 	td_restore_runstate(td, old_state);
 
-	return zbc_init(td);
+	return zbd_init(td);
 
 err_offset:
 	log_err("%s: you need to specify valid offset=\n", o->name);
@@ -1351,7 +1351,7 @@ void close_and_free_files(struct thread_data *td)
 			td_io_unlink_file(td, f);
 		}
 
-		zbc_free_zone_info(f);
+		zbd_free_zone_info(f);
 
 		if (use_free)
 			free(f->file_name);
@@ -1872,7 +1872,7 @@ void fio_file_reset(struct thread_data *td, struct fio_file *f)
 	else if (fio_file_lfsr(f))
 		lfsr_reset(&f->lfsr, td->rand_seeds[FIO_RAND_BLOCK_OFF]);
 
-	zbc_file_reset(td, f);
+	zbd_file_reset(td, f);
 }
 
 bool fio_files_done(struct thread_data *td)

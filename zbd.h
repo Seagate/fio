@@ -4,11 +4,11 @@
  * This file is released under the GPL.
  */
 
-#ifndef FIO_ZBC_H
-#define FIO_ZBC_H
+#ifndef FIO_ZBD_H
+#define FIO_ZBD_H
 
 #include <inttypes.h>
-#include "fio.h"	/* FIO_MAX_OPEN_ZBC_ZONES */
+#include "fio.h"	/* FIO_MAX_OPEN_ZBD_ZONES */
 
 #define FLEX_ZONE_TYPE 4
 #define OFFLINE_ZONE_TYPE 0xFF
@@ -19,9 +19,9 @@ struct fio_file;
  * Zoned block device models.
  */
 enum blk_zoned_model {
-	ZBC_DM_NONE,	/* Regular block device */
-	ZBC_DM_HOST_AWARE,	/* Host-aware zoned block device */
-	ZBC_DM_HOST_MANAGED,	/* Host-managed zoned block device */
+	ZBD_DM_NONE,	/* Regular block device */
+	ZBD_DM_HOST_AWARE,	/* Host-aware zoned block device */
+	ZBD_DM_HOST_MANAGED,	/* Host-managed zoned block device */
 };
 
 enum io_u_action {
@@ -31,7 +31,7 @@ enum io_u_action {
 };
 
 /**
- * struct fio_zone_info - information about a single ZBC zone
+ * struct fio_zone_info - information about a single ZBD zone
  * @start: zone start in 512 byte units
  * @wp: zone write pointer location in 512 byte units
  * @verify_block: number of blocks that have been verified for this zone
@@ -53,7 +53,8 @@ struct fio_zone_info {
 
 /**
  * zoned_block_device_info - zoned block device characteristics
- * @mutex: Protects the modifiable members in this structure
+ * @mutex: Protects the modifiable members in this structure (refcount and
+ *		num_open_zones).
  * @zone_size: size of a single zone in units of 512 bytes
  * @sectors_with_data: total size of data in all zones in units of 512 bytes
  * @zone_size_log2: log2 of the zone size in bytes if it is a power of 2 or 0
@@ -81,7 +82,7 @@ struct zoned_block_device_info {
 	uint32_t		write_cnt;
 	int				use_sg;
 	uint32_t		block_size;
-	uint32_t		open_zones[FIO_MAX_OPEN_ZBC_ZONES];
+	uint32_t		open_zones[FIO_MAX_OPEN_ZBD_ZONES];
 	struct fio_zone_info	zone_info[0];
 };
 
@@ -89,47 +90,47 @@ struct zoned_block_device_info {
                          (z->type == FLEX_ZONE_TYPE))
 
 #ifdef CONFIG_LINUX_BLKZONED
-void zbc_free_zone_info(struct fio_file *f);
-int zbc_init(struct thread_data *td);
-void zbc_file_reset(struct thread_data *td, struct fio_file *f);
-enum io_u_action zbc_adjust_block(struct thread_data *td, struct io_u *io_u);
-int zbc_do_trim(struct thread_data *td, const struct io_u *io_u);
-void zbc_update_wp(struct thread_data *td, const struct io_u *io_u);
-char *zbc_write_status(const struct group_run_stats *rs);
+void zbd_free_zone_info(struct fio_file *f);
+int zbd_init(struct thread_data *td);
+void zbd_file_reset(struct thread_data *td, struct fio_file *f);
+enum io_u_action zbd_adjust_block(struct thread_data *td, struct io_u *io_u);
+int zbd_do_trim(struct thread_data *td, const struct io_u *io_u);
+void zbd_update_wp(struct thread_data *td, const struct io_u *io_u);
+char *zbd_write_status(const struct thread_stat *ts);
 #else
-static inline void zbc_free_zone_info(struct fio_file *f)
+static inline void zbd_free_zone_info(struct fio_file *f)
 {
 }
 
-static inline int zbc_init(struct thread_data *td)
+static inline int zbd_init(struct thread_data *td)
 {
 	return 0;
 }
 
-static inline void zbc_file_reset(struct thread_data *td, struct fio_file *f)
+static inline void zbd_file_reset(struct thread_data *td, struct fio_file *f)
 {
 }
 
-static inline enum io_u_action zbc_adjust_block(struct thread_data *td,
+static inline enum io_u_action zbd_adjust_block(struct thread_data *td,
 						struct io_u *io_u)
 {
 	return io_u_accept;
 }
 
-static inline int zbc_do_trim(struct thread_data *td, const struct io_u *io_u)
+static inline int zbd_do_trim(struct thread_data *td, const struct io_u *io_u)
 {
 	return 1;
 }
 
-static inline void zbc_update_wp(struct thread_data *td,
+static inline void zbd_update_wp(struct thread_data *td,
 				 const struct io_u *io_u)
 {
 }
 
-static inline char *zbc_write_status(const struct group_run_stats *rs)
+static inline char *zbd_write_status(const struct thread_stat *ts)
 {
 	return NULL;
 }
 #endif
 
-#endif /* FIO_ZBC_H */
+#endif /* FIO_ZBD_H */

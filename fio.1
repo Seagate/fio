@@ -752,16 +752,19 @@ so. Default: false.
 .BI max_open_zones \fR=\fPint
 When running a random write test across an entire drive many more zones will be
 open than in a typical application workload. Hence this command line option
-that allows to limit the number of open zones.
+that allows to limit the number of open zones. The number of open zones is
+defined as the number of zones to which write commands are issued.
 .TP
 .BI zone_reset_threshold \fR=\fPfloat
 A number between zero and one that indicates the ratio of logical blocks with
 data to the total number of logical blocks in the test above which zones
 should be reset periodically.
+.TP
 .BI zone_reset_frequency \fR=\fPfloat
 A number between zero and one that indicates how often a zone reset should be
-issued if the zone reset threshold has been exceeded. This and the previous
-parameter can be used to simulate garbage collection activity.
+issued if the zone reset threshold has been exceeded. A zone reset is
+submitted after each (1 / zone_reset_frequency) write requests. This and the
+previous parameter can be used to simulate garbage collection activity.
 
 .SS "I/O type"
 .TP
@@ -1260,7 +1263,7 @@ If you want a workload that has 50% 2k reads and 50% 4k reads, while having
 90% 4k writes and 10% 8k writes, you would specify:
 .RS
 .P
-bssplit=2k/50:4k/50,4k/90,8k/10
+bssplit=2k/50:4k/50,4k/90:8k/10
 .RE
 .P
 Fio supports defining up to 64 different weights for each data direction.
@@ -1861,6 +1864,33 @@ unit access (fua) flag. Default: 0.
 .BI (sg)writefua \fR=\fPbool
 With writefua option set to 1, write operations include the force
 unit access (fua) flag. Default: 0.
+.TP
+.BI (sg)sg_write_mode \fR=\fPstr
+Specify the type of write commands to issue. This option can take three
+values:
+.RS
+.RS
+.TP
+.B write (default)
+Write opcodes are issued as usual
+.TP
+.B verify
+Issue WRITE AND VERIFY commands. The BYTCHK bit is set to 0. This
+directs the device to carry out a medium verification with no data
+comparison. The writefua option is ignored with this selection.
+.TP
+.B same
+Issue WRITE SAME commands. This transfers a single block to the device
+and writes this same block of data to a contiguous sequence of LBAs
+beginning at the specified offset. fio's block size parameter
+specifies the amount of data written with each command. However, the
+amount of data actually transferred to the device is equal to the
+device's block (sector) size. For a device with 512 byte sectors,
+blocksize=8k will write 16 sectors with each command. fio will still
+generate 8k of data for each command butonly the first 512 bytes will
+be used and transferred to the device. The writefua option is ignored
+with this selection.
+
 .SS "I/O depth"
 .TP
 .BI iodepth \fR=\fPint
