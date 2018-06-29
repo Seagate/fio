@@ -807,11 +807,15 @@ int zbd_create_zone_info(struct fio_file *f)
 
 	buf = malloc(bufsz + page_mask);
 	if (!buf)
+	{
+		log_err("fio: Could not allocate memory for %s's zone table\n", f->file_name);
 		goto out;
+	}
 
 	fd = open(f->file_name, O_RDONLY | O_LARGEFILE);
 	if (fd < 0) {
 		ret = -errno;
+		log_err("fio: Could not open %s\n", f->file_name);
 		goto free;
 	}
 
@@ -955,6 +959,8 @@ static int zbd_init_zone_info(struct thread_data *td, struct fio_file *file)
 	struct fio_file *f2;
 	int i, j, ret;
 
+	if (td->o.zbd_ignore)
+		return 0;
 	for_each_td(td2, i) {
 		for_each_file(td2, f2, j) {
 			if (td2 == td && f2 == file)
@@ -1410,9 +1416,9 @@ static struct fio_zone_info *zbd_replay_write_order(struct thread_data *td,
 		assert(z);
 	}
 
-	if (z->verify_block * ba >= f->zbd_info->zone_size)
-		log_err("%s: %d * %d >= %ld\n", f->file_name, z->verify_block,
-			ba, f->zbd_info->zone_size);
+	// if (z->verify_block * ba >= f->zbd_info->zone_size)
+	// 	log_err("%s: %d * %d >= %ld\n", f->file_name, z->verify_block,
+	// 		ba, f->zbd_info->zone_size);
 	io_u->offset = (z->start << 9) + z->verify_block++ * ba;
 	return z;
 }
