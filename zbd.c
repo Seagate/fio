@@ -26,6 +26,8 @@
 #include "verify.h"
 #include "zbd.h"
 
+#define INQ_CMD_CODE 0x12
+#define INQ_LEN 6
 #define RZ_CMD_CODE 0x4A
 #define SCSI_RZ_CMD_CODE 0x95
 #define REZ_CMD_CODE 0x9F
@@ -40,6 +42,9 @@
 #define HDR_SIZE 64
 #define ZONE_INFO_SIZE 64
 
+// Function declarations
+static int zbd_reset_zone(struct thread_data *td, const struct fio_file *f,
+			  struct fio_zone_info *z);
 
 /**
  * os_is_little_endian - check OS endianess for a
@@ -123,11 +128,44 @@ static int sg_send_cdb(int fd, unsigned char* cdb_buf, unsigned char cdb_len,
 	/* now for the error processing */
 	if ((io_hdr_pt->info & SG_INFO_OK_MASK) != SG_INFO_OK) {
 		dprint(FD_ZBD, "Error sending following CDB:\n");
-		for (int k = 0; k < 64; k++)
-			dprint(FD_ZBD, "%02X ", sense_buffer[k]);
-		dprint(FD_ZBD, "\n");
+		if (1 << FD_ZBD & fio_debug) {
+			for (int k = 0; k < cdb_len; k++)
+				log_info("%02X ", cdb_buf[k]);
+			log_info("\nCommand returned with following sense buffer:\n");
+			for (int k = 0; k < 64; k++)
+				log_info("%02X ", sense_buffer[k]);
+			log_info("\n");
+		}
 		return -EBADE;
 	}
+	return 0;
+}
+
+/**
+ * sg_get_protocol - Get first 36 bytes of inquiry
+ * and parse the vendor string to see if device is ATA
+ * @fd: file descriptor
+ * @is_sas: True if not SATA
+ */
+int sg_get_protocol(int fd, bool* is_sas)
+{
+	unsigned char inq_cmd_blk[6];
+	unsigned char ret_buf[36];
+	int ret;
+
+	inq_cmd_blk[0] = INQ_CMD_CODE;
+	inq_cmd_blk[1] = 0;  // EVPD
+	inq_cmd_blk[2] = 0;  // Page Code
+	inq_cmd_blk[3] = 0;  // Allocation bytes - MSB
+	inq_cmd_blk[4] = 36;  // allocation bytes - LSB
+	inq_cmd_blk[5] = 0;
+
+	ret = sg_send_cdb(fd, inq_cmd_blk, INQ_LEN, ret_buf, 36, NULL);
+	if (ret < 0)
+		return ret;
+
+	ret_buf[16] = '\0';
+	*is_sas = strcmp((char*) &ret_buf[8], "ATA     ") != 0;
 	return 0;
 }
 
@@ -137,7 +175,7 @@ static int sg_send_cdb(int fd, unsigned char* cdb_buf, unsigned char cdb_len,
  * @fd: file descriptor
  * @block_size: returned block size
  */
-int sg_read_capacity(int fd, uint32_t* block_size, uint64_t* capacity)
+int sg_read_capacity(int fd, uint32_t* block_size)
 {
 	unsigned char rcCmdBlk[16];
 	unsigned char retBuf[4096];
@@ -165,10 +203,6 @@ int sg_read_capacity(int fd, uint32_t* block_size, uint64_t* capacity)
 		return ret;
 
 	unpack_bytes(&retBuf[8], 4, false, block_size);
-	if (capacity != NULL) {
-		unpack_bytes(&retBuf[0], 8, false, capacity);
-		*capacity *= *block_size;
-	}
 	return 0;
 }
 
@@ -571,7 +605,7 @@ static bool zbd_is_seq_job(struct fio_file *f)
 
 static bool zbd_verify_sizes(void)
 {
-	const struct fio_zone_info *z;
+	struct fio_zone_info *z;
 	struct thread_data *td;
 	struct fio_file *f;
 	uint64_t new_offset, new_end;
@@ -588,31 +622,37 @@ static bool zbd_verify_sizes(void)
 				continue;
 			zone_idx = zbd_zone_idx(f, f->file_offset);
 			z = &f->zbd_info->zone_info[zone_idx];
+			// If the user defined start isn't equal to the write pointer,
+			// need to reset the zone and we're sequentially writing
+			if (f->file_offset != (z->wp << 9) && td_write(td) && !td_random(td)) {
+				// If fd is invalid, set the write pointer to an impossible value
+				// so that zbd_file_reset knows to reset the starting zone
+				if (f->fd == -1)
+					z->wp = z->start + f->zbd_info->zone_size + 1;
+				else
+					zbd_reset_zone(td, f, z);
+			}
 			if (f->file_offset != (z->start << 9)) {
-				new_offset = (z+1)->start << 9;
-				if (new_offset >= f->file_offset + f->io_size) {
-					log_info("%s: io_size must be at least one zone\n",
-						 f->file_name);
-					return false;
-				}
-				log_info("%s: rounded up offset from %lu to %lu\n",
-					 f->file_name, f->file_offset,
-					 new_offset);
-				f->io_size -= (new_offset - f->file_offset);
+				new_offset = z->start << 9;
+				dprint(FD_ZBD, "%s: rounded down offset from %lu to %lu\n",
+					f->file_name, f->file_offset, new_offset);
+				// Set the sequential starting offset to the original offset
+				// Increase the file io_size -- this shouldn't affect the amount of
+				// io actually completed
+				f->io_size += (f->file_offset - new_offset);
 				f->file_offset = new_offset;
 			}
 			zone_idx = zbd_zone_idx(f, f->file_offset + f->io_size);
 			z = &f->zbd_info->zone_info[zone_idx];
 			new_end = z->start << 9;
 			if (f->file_offset + f->io_size != new_end) {
-				if (new_end <= f->file_offset) {
-					log_info("%s: io_size must be at least one zone\n",
-						 f->file_name);
-					return false;
-				}
-				log_info("%s: rounded down io_size from %lu to %lu\n",
-					 f->file_name, f->io_size,
-					 new_end - f->file_offset);
+				// Try to round up to next zone if possible
+				zone_idx = zbd_zone_idx(f, f->file_offset + f->io_size +
+					(f->zbd_info->zone_size << 9));
+				z = &f->zbd_info->zone_info[zone_idx];
+				new_end = z->start << 9;
+				dprint(FD_ZBD, "%s: rounded io_size from %lu to %lu\n",
+					f->file_name, f->io_size, new_end - f->file_offset);
 				f->io_size = new_end - f->file_offset;
 			}
 		}
@@ -686,7 +726,7 @@ static int read_zone_info(int fd, int* use_sg_rz, uint32_t* block_size,
 	// Try issuing the sg_report_zones instead
 	if (ret != 0 || *use_sg_rz != 0) {
 		if (*block_size < 512) {
-			ret = sg_read_capacity(fd, block_size, NULL);
+			ret = sg_read_capacity(fd, block_size);
 			if (ret != 0) {
 				log_info("failed to read capacity with return %d\n", ret);
 				*block_size = 0;
@@ -696,23 +736,26 @@ static int read_zone_info(int fd, int* use_sg_rz, uint32_t* block_size,
 		// Round the bufsz to an even multiple of the block size
 		bufsz = (bufsz / *block_size) * (*block_size);
 		start_lba = (start_sector * 512) / (*block_size);
-		use_scsi = (*use_sg_rz == 2) || (*use_sg_rz == -1);
+		// Get whether the device is SAS or SATA
+		if (*use_sg_rz == -1) {
+			ret = sg_get_protocol(fd, &use_scsi);
+			if (ret != 0) {
+				log_info("failed to issue identify with return %d\n", ret);
+				return ret;
+			}
+			*use_sg_rz = use_scsi ? 2: 1;
+		} else
+			use_scsi = *use_sg_rz == 2;
 		for (retry = 0; retry < 10; retry++) {
 			ret = sg_report_zones(fd, start_lba, buf, bufsz, use_scsi);
-			if (ret != -EINVAL) {
+			if (ret != -EINVAL && ret != -EBADE) {
 				break;
 			}
-			if (*use_sg_rz == -1)
-				use_scsi = !use_scsi;
 		}
 		if (ret != 0) {
 			log_info("failed to report zones with return %d\n", ret);
 			return ret;
 		}
-		else if (use_scsi)
-			*use_sg_rz = 2;
-		else
-			*use_sg_rz = 1;
 		ret = parse_to_structs(buf, bufsz, *block_size / 512, use_scsi);
 		if (ret != 0) {
 			log_info("failed to parse to structs with return %d\n", ret);
@@ -1221,6 +1264,23 @@ void zbd_file_reset(struct thread_data *td, struct fio_file *f)
 			(td->o.td_ddir & TD_DDIR_WRITE) &&
 			td->runstate != TD_VERIFYING);
 	zbd_reset_write_cnt(td, f);
+
+	/*
+	 * If the write pointer is set to this impossible flag value, it means
+	 * zbd_verify_sizes flagged the first zone to be reset, but couldn't
+	 * reset it before the real file was opened, so we'll reset it now
+	 */
+	if (zb->wp == zb->start + f->zbd_info->zone_size + 1)
+		zbd_reset_zone(td, f, zb);
+	/*
+	 * Set the first write position to the write pointer in case the user
+	 * specified to start writing at the write pointer in an open zone
+	 * but we rounded the file offset to the start of the zone in
+	 * zbd_verify_sizes
+	 */
+
+	if ((zb->wp << 9) != f->last_pos[DDIR_WRITE])
+		f->last_pos[DDIR_WRITE] = zb->wp << 9;
 }
 
 /* The caller must hold f->zbd_info->mutex. */
