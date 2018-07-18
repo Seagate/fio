@@ -916,6 +916,14 @@ int zbd_create_zone_info(struct fio_file *f)
 				ret = -EINVAL;
 				goto close;
 			}
+			if (nr_zones - j == 0) {
+				// For reasons completely opaque to me, if we exit this loop
+				// normally on the last try, the postred marker will get
+				// set to 0, causing a valid but apparently harmless
+				// warning that I'd still rather avoid -- likely
+				// to be system dependent
+				break;
+			}
 		}
 		z--;
 		start_sector = z->start + z->len;
