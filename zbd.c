@@ -576,7 +576,7 @@ static bool zbd_using_direct_io(void)
 	int i, j;
 
 	for_each_td(td, i) {
-		if (td->o.odirect || !(td->o.td_ddir & TD_DDIR_WRITE))
+		if (td->o.odirect || !(td->o.td_ddir & TD_DDIR_WRITE) || !strcmp(td->o.ioengine, "sg"))
 			continue;
 		for_each_file(td, f, j) {
 			if (f->zbd_info)
