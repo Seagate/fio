@@ -752,10 +752,9 @@ static int read_zone_info(int fd, int* use_sg_rz, uint32_t* block_size,
 				break;
 			}
 		}
-		if (ret != 0) {
-			log_info("failed to report zones with return %d\n", ret);
+		if (ret != 0)
 			return ret;
-		}
+
 		ret = parse_to_structs(buf, bufsz, *block_size / 512, use_scsi);
 		if (ret != 0) {
 			log_info("failed to parse to structs with return %d\n", ret);
@@ -966,8 +965,11 @@ check_ret:
 			log_err("fio: read_zone_info (%lu) failed for %s (%d).\n",
 				 start_sector, f->file_name, errno);
 		else
+		{
 			dprint(FD_ZBD, "read_zone_info (%lu) failed for %s (%d).\n",
 				start_sector, f->file_name, errno);
+			ret = 0;
+		}
 	}
 close:
 	sfree(zbd_info);
