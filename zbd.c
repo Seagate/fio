@@ -740,7 +740,7 @@ static int read_zone_info(int fd, int* use_sg_rz, uint32_t* block_size,
 		if (*use_sg_rz == -1) {
 			ret = sg_get_protocol(fd, &use_scsi);
 			if (ret != 0) {
-				log_info("failed to issue identify with return %d\n", ret);
+				log_info("failed to issue inquiry with return %d\n", ret);
 				return ret;
 			}
 			*use_sg_rz = use_scsi ? 2: 1;
@@ -1082,8 +1082,21 @@ static int zbd_reset_range(struct thread_data *td, const struct fio_file *f,
 	if (f->zbd_info->use_sg)
 		ret = sg_reset_zones(f->fd, &zr, f->zbd_info->block_size,
 			f->zbd_info->zone_size, f->zbd_info->use_sg == 2);
-	else
+	else {
 		ret = ioctl(f->fd, BLKRESETZONE, &zr);
+		if (ret < 0) {
+			bool use_scsi;
+			dprint(FD_ZBD, "%s: resetting wp with ioctl at sector %llu for %llu "
+				"sectors failed (%d), trying sg_driver instead\n",
+				f->file_name, zr.nr_sectors, zr.sector, errno);
+			ret = sg_get_protocol(f->fd, &use_scsi);
+			if (ret != 0) {
+				log_info("failed to issue inquiry with return %d\n", ret);
+				return ret;
+			}
+			f->zbd_info->use_sg = use_scsi ? 2: 1;
+		}
+	}
 	if (ret < 0) {
 		td_verror(td, errno, "resetting wp failed");
 		log_err("%s: resetting wp for %llu sectors at sector %llu failed (%d).\n",
