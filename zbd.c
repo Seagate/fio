@@ -1302,7 +1302,9 @@ void zbd_file_reset(struct thread_data *td, struct fio_file *f)
 	 * zbd_verify_sizes
 	 */
 
-	if ((zb->wp << 9) != f->last_pos[DDIR_WRITE])
+	if (wp_zone(zb) && ((zb->wp << 9) != f->last_pos[DDIR_WRITE]) &&
+		(f->last_pos[DDIR_WRITE] < zb->start + f->zbd_info->zone_size)
+		)
 		f->last_pos[DDIR_WRITE] = zb->wp << 9;
 }
 
