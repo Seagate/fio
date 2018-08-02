@@ -623,8 +623,10 @@ static bool zbd_verify_sizes(void)
 			zone_idx = zbd_zone_idx(f, f->file_offset);
 			z = &f->zbd_info->zone_info[zone_idx];
 			// If the user defined start isn't equal to the write pointer,
-			// need to reset the zone and we're sequentially writing
-			if (f->file_offset != (z->wp << 9) && td_write(td) && !td_random(td)) {
+			// and we're sequentially writing, need to reset the zone
+			if (z->type == BLK_ZONE_TYPE_SEQWRITE_REQ &&
+				f->file_offset != (z->wp << 9) &&
+				td_write(td) && !td_random(td)) {
 				// If fd is invalid, set the write pointer to an impossible value
 				// so that zbd_file_reset knows to reset the starting zone
 				if (f->fd == -1)
@@ -1295,6 +1297,7 @@ void zbd_file_reset(struct thread_data *td, struct fio_file *f)
 	 */
 	if (zb->wp == zb->start + f->zbd_info->zone_size + 1)
 		zbd_reset_zone(td, f, zb);
+
 	/*
 	 * Set the first write position to the write pointer in case the user
 	 * specified to start writing at the write pointer in an open zone
