@@ -591,14 +591,17 @@ static bool zbd_using_direct_io(void)
 static bool zbd_is_seq_job(struct fio_file *f)
 {
 	uint32_t zone_idx, zone_idx_b, zone_idx_e;
+	struct fio_zone_info *z;
 
 	assert(f->zbd_info);
 	zone_idx_b = zbd_zone_idx(f, f->file_offset);
 	zone_idx_e = zbd_zone_idx(f, f->file_offset + f->io_size);
-	for (zone_idx = zone_idx_b; zone_idx <= zone_idx_e; zone_idx++)
-		if (f->zbd_info->zone_info[zone_idx].type ==
-		    BLK_ZONE_TYPE_SEQWRITE_REQ)
+	for (zone_idx = zone_idx_b; zone_idx <= zone_idx_e; zone_idx++) {
+		z = &f->zbd_info->zone_info[zone_idx];
+		if (wp_zone(z) ||
+		    z->type == OFFLINE_ZONE_TYPE)
 			return true;
+	}
 
 	return false;
 }
@@ -609,8 +612,9 @@ static bool zbd_verify_sizes(void)
 	struct thread_data *td;
 	struct fio_file *f;
 	uint64_t new_offset, new_end;
-	uint32_t zone_idx;
+	uint32_t zone_idx, zones_checked;
 	int i, j;
+
 
 	for_each_td(td, i) {
 		for_each_file(td, f, j) {
@@ -622,6 +626,20 @@ static bool zbd_verify_sizes(void)
 				continue;
 			zone_idx = zbd_zone_idx(f, f->file_offset);
 			z = &f->zbd_info->zone_info[zone_idx];
+			// If the starting offset zone is offline, scan forward to an
+			// online zone, wrapping if needed
+			if (z->type == OFFLINE_ZONE_TYPE) {
+				for (zones_checked = 1; zones_checked < f->zbd_info->nr_zones; zones_checked++)
+				{
+					zone_idx = zbd_zone_idx(f, f->file_offset);
+					z = &f->zbd_info->zone_info[(zone_idx + zones_checked) % f->zbd_info->nr_zones];
+					if (z->type != OFFLINE_ZONE_TYPE)
+						break;
+				}
+				if (z->type == OFFLINE_ZONE_TYPE)
+					log_err("%s: No online zones found\n", f->file_name);
+				f->file_offset = (z->start) << 9;
+			}
 			// If the user defined start isn't equal to the write pointer,
 			// and we're sequentially writing, need to reset the zone
 			if (z->type == BLK_ZONE_TYPE_SEQWRITE_REQ &&
@@ -938,6 +956,7 @@ int zbd_create_zone_info(struct fio_file *f)
 	}
 	/* a sentinel */
 	zbd_info->zone_info[nr_zones].start = start_sector;
+	zbd_info->zone_info[nr_zones].type = OFFLINE_ZONE_TYPE;
 
 	// Set all the offline zone's wp to the next valid zone start, or 0
 	start_sector = 0;
@@ -1271,15 +1290,15 @@ void zbd_file_reset(struct thread_data *td, struct fio_file *f)
 	zb = &f->zbd_info->zone_info[zbd_zone_idx(f, f->file_offset)];
 	zone_idx_e = zbd_zone_idx(f, f->file_offset + f->io_size);
 	ze = &f->zbd_info->zone_info[zone_idx_e];
+	pthread_mutex_lock(&f->zbd_info->mutex);
 	for (z = zb ; z < ze; z++) {
 		pthread_mutex_lock(&z->mutex);
 		swd += z->wp - z->start;
 	}
-	pthread_mutex_lock(&f->zbd_info->mutex);
-	f->zbd_info->sectors_with_data = swd;
-	pthread_mutex_unlock(&f->zbd_info->mutex);
 	for (z = zb ; z < ze; z++)
 		pthread_mutex_unlock(&z->mutex);
+	f->zbd_info->sectors_with_data = swd;
+	pthread_mutex_unlock(&f->zbd_info->mutex);
 	/*
 	 * If data verification is enabled reset the affected zones before
 	 * writing any data to avoid that a zone reset has to be issued while
@@ -1295,8 +1314,10 @@ void zbd_file_reset(struct thread_data *td, struct fio_file *f)
 	 * zbd_verify_sizes flagged the first zone to be reset, but couldn't
 	 * reset it before the real file was opened, so we'll reset it now
 	 */
-	if (zb->wp == zb->start + f->zbd_info->zone_size + 1)
+	if (zb->wp == zb->start + f->zbd_info->zone_size + 1) {
+		dprint(FD_ZBD, "%s: Resetting starting zone\n", f->file_name);
 		zbd_reset_zone(td, f, zb);
+	}
 
 	/*
 	 * Set the first write position to the write pointer in case the user
