@@ -408,6 +408,9 @@ static int parse_to_structs(unsigned char* buf, unsigned int bufsz,
 		if (zone_size == 0) {
 			break;
 		}
+		// Convert large marker wp to start + zone_size
+		if (write_pointer > zone_start + zone_size)
+			write_pointer = zone_start + zone_size;
 		// Convert LBAs to sectors
 		zone_size *= secPerLba;
 		zone_start *= secPerLba;
@@ -1181,7 +1184,7 @@ static int zbd_reset_zones(struct thread_data *td, struct fio_file *f,
 	bool reset_wp;
 	int res = 0;
 
-	dprint(FD_ZBD, "%s: resetting zones\n", f->file_name);
+	dprint(FD_ZBD, "%s: checking for zones to reset\n", f->file_name);
 	assert(f->fd != -1);
 	for (z = zb; z < ze; z++) {
 		pthread_mutex_lock(&z->mutex);
@@ -1213,11 +1216,13 @@ static int zbd_reset_zones(struct thread_data *td, struct fio_file *f,
 			start_z = ze;
 		}
 	}
-	dprint(FD_ZBD, "%s: resetting zones %lu .. %lu\n", f->file_name,
-	       start_z - f->zbd_info->zone_info, z - f->zbd_info->zone_info);
-	if (start_z < ze && zbd_reset_range(td, f, start_z->start,
-					    z->start - start_z->start) < 0)
-		res = 1;
+	if (start_z < ze) {
+		dprint(FD_ZBD, "%s: resetting zones %lu .. %lu\n", f->file_name,
+		       start_z - f->zbd_info->zone_info, z - f->zbd_info->zone_info);
+		if (zbd_reset_range(td, f, start_z->start,
+			z->start - start_z->start) < 0)
+			res = 1;
+	}
 	for (z = zb; z < ze; z++)
 		pthread_mutex_unlock(&z->mutex);
 
@@ -1299,15 +1304,6 @@ void zbd_file_reset(struct thread_data *td, struct fio_file *f)
 		pthread_mutex_unlock(&z->mutex);
 	f->zbd_info->sectors_with_data = swd;
 	pthread_mutex_unlock(&f->zbd_info->mutex);
-	/*
-	 * If data verification is enabled reset the affected zones before
-	 * writing any data to avoid that a zone reset has to be issued while
-	 * writing data, which causes data loss.
-	 */
-	zbd_reset_zones(td, f, zb, ze, td->o.verify != VERIFY_NONE &&
-			(td->o.td_ddir & TD_DDIR_WRITE) &&
-			td->runstate != TD_VERIFYING);
-	zbd_reset_write_cnt(td, f);
 
 	/*
 	 * If the write pointer is set to this impossible flag value, it means
@@ -1318,6 +1314,16 @@ void zbd_file_reset(struct thread_data *td, struct fio_file *f)
 		dprint(FD_ZBD, "%s: Resetting starting zone\n", f->file_name);
 		zbd_reset_zone(td, f, zb);
 	}
+
+	/*
+	 * If data verification is enabled reset the affected zones before
+	 * writing any data to avoid that a zone reset has to be issued while
+	 * writing data, which causes data loss.
+	 */
+	zbd_reset_zones(td, f, zb, ze, td->o.verify != VERIFY_NONE &&
+			(td->o.td_ddir & TD_DDIR_WRITE) &&
+			td->runstate != TD_VERIFYING);
+	zbd_reset_write_cnt(td, f);
 
 	/*
 	 * Set the first write position to the write pointer in case the user
@@ -1772,6 +1778,8 @@ enum io_u_action zbd_adjust_block(struct thread_data *td, struct io_u *io_u)
 			if ((f->zbd_info->sectors_with_data << 9) >=
 				f->io_size * td->o.zrt.u.f &&
 				zbd_dec_and_reset_write_cnt(td, f)) {
+				dprint(FD_ZBD, "Reset threshold %f exceeded (reset frequency = %f)\n",
+					td->o.zrt.u.f, td->o.zrf.u.f);
 				zb->reset_zone = 1;
 			}
 		}
