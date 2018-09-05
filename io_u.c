@@ -1689,6 +1689,7 @@ struct io_u *get_io_u(struct thread_data *td)
 	if (td->flags & TD_F_READ_IOLOG) {
 		if (read_iolog_get(td, io_u))
 			goto err_put;
+	// Get the io_u file and set the buflen
 	} else if (set_io_u_file(td, io_u)) {
 		ret = -EBUSY;
 		dprint(FD_IO, "io_u %p, setting file failed\n", io_u);

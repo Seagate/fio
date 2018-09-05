@@ -1729,19 +1729,10 @@ enum io_u_action zbd_adjust_block(struct thread_data *td, struct io_u *io_u)
 			goto accept;
 		}
 		/*
-		 * Avoid reads past the write pointer because such reads do not
-		 * hit the medium.
+		 * Move the read to another zone if there is not enough
+		 * data in the current zone for the specified buflen
 		 */
-		range = ((zb->wp - zb->start) << 9) - io_u->buflen;
-		if (td_random(td) && range >= 0) {
-			io_u->offset = (zb->start << 9) +
-				((io_u->offset - (zb->start << 9)) %
-				 (range + 1)) / min_bs * min_bs;
-			assert(zb->start << 9 <= io_u->offset);
-			assert(io_u->offset + io_u->buflen <= zb->wp << 9);
-			goto accept;
-		}
-		if ((io_u->offset + io_u->buflen) >> 9 > zb->wp) {
+		if (io_u->buflen >> 9 > zb->wp - zb->start) {
 			pthread_mutex_unlock(&zb->mutex);
 			zl = &f->zbd_info->zone_info[zbd_zone_idx(f,
 						f->file_offset + f->io_size)];
@@ -1754,6 +1745,19 @@ enum io_u_action zbd_adjust_block(struct thread_data *td, struct io_u *io_u)
 				goto eof;
 			}
 			io_u->offset = zb->start << 9;
+		}
+		/*
+		 * Avoid reads past the write pointer because such reads do not
+		 * hit the medium.
+		 */
+		range = ((zb->wp - zb->start) << 9) - io_u->buflen;
+		if (td_random(td) && range >= 0) {
+			io_u->offset = (zb->start << 9) +
+				((io_u->offset - (zb->start << 9)) %
+				 (range + 1)) / min_bs * min_bs;
+			assert(zb->start << 9 <= io_u->offset);
+			assert(io_u->offset + io_u->buflen <= zb->wp << 9);
+			goto accept;
 		}
 		if ((io_u->offset + io_u->buflen) >> 9 > zb->wp) {
 			dprint(FD_ZBD, "%s: %lld + %ld > %ld\n",
