@@ -50,7 +50,7 @@ SOURCE :=	$(sort $(patsubst $(SRCDIR)/%,%,$(wildcard $(SRCDIR)/crc/*.c)) \
 		gettime-thread.c helpers.c json.c idletime.c td_error.c \
 		profiles/tiobench.c profiles/act.c io_u_queue.c filelock.c \
 		workqueue.c rate-submit.c optgroup.c helper_thread.c \
-		steadystate.c
+		steadystate.c zone-dist.c
 
 ifdef CONFIG_LIBHDFS
   HDFSFLAGS= -I $(JAVA_HOME)/include -I $(JAVA_HOME)/include/linux -I $(FIO_LIBHDFS_INCLUDE)
@@ -86,9 +86,6 @@ endif
 ifdef CONFIG_GUASI
   SOURCE += engines/guasi.c
 endif
-ifdef CONFIG_FUSION_AW
-  SOURCE += engines/fusion-aw.c
-endif
 ifdef CONFIG_SOLARISAIO
   SOURCE += engines/solarisaio.c
 endif
@@ -100,6 +97,9 @@ ifdef CONFIG_RADOS
 endif
 ifdef CONFIG_RBD
   SOURCE += engines/rbd.c
+endif
+ifdef CONFIG_HTTP
+  SOURCE += engines/http.c
 endif
 SOURCE += oslib/asprintf.c
 ifndef CONFIG_STRSEP
@@ -142,8 +142,11 @@ endif
 ifdef CONFIG_LIBPMEM
   SOURCE += engines/libpmem.c
 endif
+ifdef CONFIG_IME
+  SOURCE += engines/ime.c
+endif
 ifdef CONFIG_LINUX_BLKZONED
-  SOURCE += zbc.c
+  SOURCE += zbd.c
 endif
 
 ifeq ($(CONFIG_TARGET_OS), Linux)

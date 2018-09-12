@@ -14,7 +14,7 @@
 #include "lib/output_buffer.h"
 #include "helper_thread.h"
 #include "smalloc.h"
-#include "zbc.h"
+#include "zbd.h"
 
 #define LOG_MSEC_SLACK	1
 
@@ -420,7 +420,7 @@ static void show_ddir_status(struct group_run_stats *rs, struct thread_stat *ts,
 	unsigned long runt;
 	unsigned long long min, max, bw, iops;
 	double mean, dev;
-	char *io_p, *bw_p, *bw_p_alt, *iops_p, *zbc_w_st = NULL;
+	char *io_p, *bw_p, *bw_p_alt, *iops_p, *zbd_w_st = NULL;
 	int i2p;
 
 	if (ddir_sync(ddir)) {
@@ -452,15 +452,15 @@ static void show_ddir_status(struct group_run_stats *rs, struct thread_stat *ts,
 	iops = (1000 * (uint64_t)ts->total_io_u[ddir]) / runt;
 	iops_p = num2str(iops, ts->sig_figs, 1, 0, N2S_NONE);
 	if (ddir == DDIR_WRITE)
-		zbc_w_st = zbc_write_status(rs);
+		zbd_w_st = zbd_write_status(ts);
 
 	log_buf(out, "  %s: IOPS=%s, BW=%s (%s)(%s/%llumsec)%s\n",
 			rs->unified_rw_rep ? "mixed" : str[ddir],
 			iops_p, bw_p, bw_p_alt, io_p,
 			(unsigned long long) ts->runtime[ddir],
-			zbc_w_st ? : "");
+			zbd_w_st ? : "");
 
-	free(zbc_w_st);
+	free(zbd_w_st);
 	free(io_p);
 	free(bw_p);
 	free(bw_p_alt);
@@ -636,8 +636,8 @@ static int block_state_category(int block_state)
 
 static int compare_block_infos(const void *bs1, const void *bs2)
 {
-	uint32_t block1 = *(uint32_t *)bs1;
-	uint32_t block2 = *(uint32_t *)bs2;
+	uint64_t block1 = *(uint64_t *)bs1;
+	uint64_t block2 = *(uint64_t *)bs2;
 	int state1 = BLOCK_INFO_STATE(block1);
 	int state2 = BLOCK_INFO_STATE(block2);
 	int bscat1 = block_state_category(state1);
@@ -1321,7 +1321,7 @@ static void show_thread_status_terse_all(struct thread_stat *ts,
 		log_buf(out, ";%3.2f%%", io_u_lat_m[i]);
 
 	/* disk util stats, if any */
-	if (ver >= 3)
+	if (ver >= 3 && is_running_backend())
 		show_disk_util(1, NULL, out);
 
 	/* Additional output if continue_on_error set - default off*/
@@ -1404,19 +1404,15 @@ static struct json_object *show_thread_status_json(struct thread_stat *ts,
 		usr_cpu = 0;
 		sys_cpu = 0;
 	}
+	json_object_add_value_int(root, "job_runtime", ts->total_run_time);
 	json_object_add_value_float(root, "usr_cpu", usr_cpu);
 	json_object_add_value_float(root, "sys_cpu", sys_cpu);
 	json_object_add_value_int(root, "ctx", ts->ctx);
 	json_object_add_value_int(root, "majf", ts->majf);
 	json_object_add_value_int(root, "minf", ts->minf);
 
-
-	/* Calc % distribution of IO depths, usecond, msecond latency */
+	/* Calc % distribution of IO depths */
 	stat_calc_dist(ts->io_u_map, ddir_rw_sum(ts->total_io_u), io_u_dist);
-	stat_calc_lat_n(ts, io_u_lat_n);
-	stat_calc_lat_u(ts, io_u_lat_u);
-	stat_calc_lat_m(ts, io_u_lat_m);
-
 	tmp = json_create_object();
 	json_object_add_value_object(root, "iodepth_level", tmp);
 	/* Only show fixed 7 I/O depth levels*/
@@ -1428,6 +1424,44 @@ static struct json_object *show_thread_status_json(struct thread_stat *ts,
 			snprintf(name, 20, ">=%d", 1 << i);
 		json_object_add_value_float(tmp, (const char *)name, io_u_dist[i]);
 	}
+
+	/* Calc % distribution of submit IO depths */
+	stat_calc_dist(ts->io_u_submit, ts->total_submit, io_u_dist);
+	tmp = json_create_object();
+	json_object_add_value_object(root, "iodepth_submit", tmp);
+	/* Only show fixed 7 I/O depth levels*/
+	for (i = 0; i < 7; i++) {
+		char name[20];
+		if (i == 0)
+			snprintf(name, 20, "0");
+		else if (i < 6)
+			snprintf(name, 20, "%d", 1 << (i+1));
+		else
+			snprintf(name, 20, ">=%d", 1 << i);
+		json_object_add_value_float(tmp, (const char *)name, io_u_dist[i]);
+	}
+
+	/* Calc % distribution of completion IO depths */
+	stat_calc_dist(ts->io_u_complete, ts->total_complete, io_u_dist);
+	tmp = json_create_object();
+	json_object_add_value_object(root, "iodepth_complete", tmp);
+	/* Only show fixed 7 I/O depth levels*/
+	for (i = 0; i < 7; i++) {
+		char name[20];
+		if (i == 0)
+			snprintf(name, 20, "0");
+		else if (i < 6)
+			snprintf(name, 20, "%d", 1 << (i+1));
+		else
+			snprintf(name, 20, ">=%d", 1 << i);
+		json_object_add_value_float(tmp, (const char *)name, io_u_dist[i]);
+	}
+
+	/* Calc % distribution of nsecond, usecond, msecond latency */
+	stat_calc_dist(ts->io_u_map, ddir_rw_sum(ts->total_io_u), io_u_dist);
+	stat_calc_lat_n(ts, io_u_lat_n);
+	stat_calc_lat_u(ts, io_u_lat_u);
+	stat_calc_lat_m(ts, io_u_lat_m);
 
 	/* Nanosecond latency */
 	tmp = json_create_object();
@@ -1514,7 +1548,7 @@ static struct json_object *show_thread_status_json(struct thread_stat *ts,
 	if (ts->ss_dur) {
 		struct json_object *data;
 		struct json_array *iops, *bw;
-		int i, j, k;
+		int j, k, l;
 		char ss_buf[64];
 
 		snprintf(ss_buf, sizeof(ss_buf), "%s%s:%f%s",
@@ -1550,8 +1584,8 @@ static struct json_object *show_thread_status_json(struct thread_stat *ts,
 			j = ts->ss_head;
 		else
 			j = ts->ss_head == 0 ? ts->ss_dur - 1 : ts->ss_head - 1;
-		for (i = 0; i < ts->ss_dur; i++) {
-			k = (j + i) % ts->ss_dur;
+		for (l = 0; l < ts->ss_dur; l++) {
+			k = (j + l) % ts->ss_dur;
 			json_array_add_value_int(bw, ts->ss_bw_data[k]);
 			json_array_add_value_int(iops, ts->ss_iops_data[k]);
 		}
@@ -1748,6 +1782,7 @@ void sum_thread_stats(struct thread_stat *dst, struct thread_stat *src,
 	dst->total_run_time += src->total_run_time;
 	dst->total_submit += src->total_submit;
 	dst->total_complete += src->total_complete;
+	dst->nr_zone_resets += src->nr_zone_resets;
 }
 
 void init_group_run_stat(struct group_run_stats *gs)
@@ -2065,17 +2100,12 @@ void __show_run_stats(void)
 		buf_output_free(out);
 	}
 
+	fio_idle_prof_cleanup();
+
 	log_info_flush();
 	free(runstats);
 	free(threadstats);
 	free(opt_lists);
-}
-
-void show_run_stats(void)
-{
-	fio_sem_down(stat_sem);
-	__show_run_stats();
-	fio_sem_up(stat_sem);
 }
 
 void __show_running_run_stats(void)
@@ -2343,17 +2373,19 @@ static struct io_logs *get_cur_log(struct io_log *iolog)
 	 * submissions, flag 'td' as needing a log regrow and we'll take
 	 * care of it on the submission side.
 	 */
-	if (iolog->td->o.io_submit_mode == IO_MODE_OFFLOAD ||
+	if ((iolog->td && iolog->td->o.io_submit_mode == IO_MODE_OFFLOAD) ||
 	    !per_unit_log(iolog))
 		return regrow_log(iolog);
 
-	iolog->td->flags |= TD_F_REGROW_LOGS;
-	assert(iolog->pending->nr_samples < iolog->pending->max_samples);
+	if (iolog->td)
+		iolog->td->flags |= TD_F_REGROW_LOGS;
+	if (iolog->pending)
+		assert(iolog->pending->nr_samples < iolog->pending->max_samples);
 	return iolog->pending;
 }
 
 static void __add_log_sample(struct io_log *iolog, union io_sample_data data,
-			     enum fio_ddir ddir, unsigned int bs,
+			     enum fio_ddir ddir, unsigned long long bs,
 			     unsigned long t, uint64_t offset, unsigned int priorityBit)
 {
 	struct io_logs *cur_log;
@@ -2440,6 +2472,7 @@ void reset_io_stats(struct thread_data *td)
 
 	ts->total_submit = 0;
 	ts->total_complete = 0;
+	ts->nr_zone_resets = 0;
 }
 
 static void __add_stat_to_log(struct io_log *iolog, enum fio_ddir ddir,
@@ -2476,7 +2509,7 @@ static void _add_stat_to_log(struct io_log *iolog, unsigned long elapsed,
 static unsigned long add_log_sample(struct thread_data *td,
 				    struct io_log *iolog,
 				    union io_sample_data data,
-				    enum fio_ddir ddir, unsigned int bs,
+				    enum fio_ddir ddir, unsigned long long bs,
 				    uint64_t offset)
 {
 	unsigned long elapsed, this_window;
@@ -2538,7 +2571,8 @@ void finalize_logs(struct thread_data *td, bool unit_logs)
 		_add_stat_to_log(td->iops_log, elapsed, td->o.log_max != 0, td->priorityBit);
 }
 
-void add_agg_sample(union io_sample_data data, enum fio_ddir ddir, unsigned int bs, unsigned int priorityBit)
+void add_agg_sample(union io_sample_data data, enum fio_ddir ddir, unsigned long long bs,
+					unsigned int priorityBit)
 {
 	struct io_log *iolog;
 
@@ -2577,13 +2611,16 @@ static void add_clat_percentile_sample(struct thread_stat *ts,
 }
 
 void add_clat_sample(struct thread_data *td, enum fio_ddir ddir,
-		     unsigned long long nsec, unsigned int bs, uint64_t offset)
+		     unsigned long long nsec, unsigned long long bs,
+		     uint64_t offset)
 {
+	const bool needs_lock = td_async_processing(td);
 	unsigned long elapsed, this_window;
 	struct thread_stat *ts = &td->ts;
 	struct io_log *iolog = td->clat_hist_log;
 
-	td_io_u_lock(td);
+	if (needs_lock)
+		__td_io_u_lock(td);
 
 	add_stat_sample(&ts->clat_stat[ddir], nsec);
 
@@ -2644,36 +2681,43 @@ void add_clat_sample(struct thread_data *td, enum fio_ddir ddir,
 		}
 	}
 
-	td_io_u_unlock(td);
+	if (needs_lock)
+		__td_io_u_unlock(td);
 }
 
 void add_slat_sample(struct thread_data *td, enum fio_ddir ddir,
-		     unsigned long usec, unsigned int bs, uint64_t offset)
+		     unsigned long usec, unsigned long long bs, uint64_t offset)
 {
+	const bool needs_lock = td_async_processing(td);
 	struct thread_stat *ts = &td->ts;
 
 	if (!ddir_rw(ddir))
 		return;
 
-	td_io_u_lock(td);
+	if (needs_lock)
+		__td_io_u_lock(td);
 
 	add_stat_sample(&ts->slat_stat[ddir], usec);
 
 	if (td->slat_log)
 		add_log_sample(td, td->slat_log, sample_val(usec), ddir, bs, offset);
 
-	td_io_u_unlock(td);
+	if (needs_lock)
+		__td_io_u_unlock(td);
 }
 
 void add_lat_sample(struct thread_data *td, enum fio_ddir ddir,
-		    unsigned long long nsec, unsigned int bs, uint64_t offset)
+		    unsigned long long nsec, unsigned long long bs,
+		    uint64_t offset)
 {
+	const bool needs_lock = td_async_processing(td);
 	struct thread_stat *ts = &td->ts;
 
 	if (!ddir_rw(ddir))
 		return;
 
-	td_io_u_lock(td);
+	if (needs_lock)
+		__td_io_u_lock(td);
 
 	add_stat_sample(&ts->lat_stat[ddir], nsec);
 
@@ -2684,12 +2728,14 @@ void add_lat_sample(struct thread_data *td, enum fio_ddir ddir,
 	if (ts->lat_percentiles)
 		add_clat_percentile_sample(ts, nsec, ddir);
 
-	td_io_u_unlock(td);
+	if (needs_lock)
+		__td_io_u_unlock(td);
 }
 
 void add_bw_sample(struct thread_data *td, struct io_u *io_u,
 		   unsigned int bytes, unsigned long long spent)
 {
+	const bool needs_lock = td_async_processing(td);
 	struct thread_stat *ts = &td->ts;
 	unsigned long rate;
 
@@ -2698,7 +2744,8 @@ void add_bw_sample(struct thread_data *td, struct io_u *io_u,
 	else
 		rate = 0;
 
-	td_io_u_lock(td);
+	if (needs_lock)
+		__td_io_u_lock(td);
 
 	add_stat_sample(&ts->bw_stat[io_u->ddir], rate);
 
@@ -2707,7 +2754,9 @@ void add_bw_sample(struct thread_data *td, struct io_u *io_u,
 			       bytes, io_u->offset);
 
 	td->stat_io_bytes[io_u->ddir] = td->this_io_bytes[io_u->ddir];
-	td_io_u_unlock(td);
+
+	if (needs_lock)
+		__td_io_u_unlock(td);
 }
 
 static int __add_samples(struct thread_data *td, struct timespec *parent_tv,
@@ -2716,6 +2765,7 @@ static int __add_samples(struct thread_data *td, struct timespec *parent_tv,
 			 struct io_stat *stat, struct io_log *log,
 			 bool is_kb)
 {
+	const bool needs_lock = td_async_processing(td);
 	unsigned long spent, rate;
 	enum fio_ddir ddir;
 	unsigned long next, next_log;
@@ -2726,7 +2776,8 @@ static int __add_samples(struct thread_data *td, struct timespec *parent_tv,
 	if (spent < avg_time && avg_time - spent >= LOG_MSEC_SLACK)
 		return avg_time - spent;
 
-	td_io_u_lock(td);
+	if (needs_lock)
+		__td_io_u_lock(td);
 
 	/*
 	 * Compute both read and write rates for the interval.
@@ -2749,7 +2800,7 @@ static int __add_samples(struct thread_data *td, struct timespec *parent_tv,
 		add_stat_sample(&stat[ddir], rate);
 
 		if (log) {
-			unsigned int bs = 0;
+			unsigned long long bs = 0;
 
 			if (td->o.min_bs[ddir] == td->o.max_bs[ddir])
 				bs = td->o.min_bs[ddir];
@@ -2763,7 +2814,8 @@ static int __add_samples(struct thread_data *td, struct timespec *parent_tv,
 
 	timespec_add_msec(parent_tv, avg_time);
 
-	td_io_u_unlock(td);
+	if (needs_lock)
+		__td_io_u_unlock(td);
 
 	if (spent <= avg_time)
 		next = avg_time;
@@ -2783,9 +2835,11 @@ static int add_bw_samples(struct thread_data *td, struct timespec *t)
 void add_iops_sample(struct thread_data *td, struct io_u *io_u,
 		     unsigned int bytes)
 {
+	const bool needs_lock = td_async_processing(td);
 	struct thread_stat *ts = &td->ts;
 
-	td_io_u_lock(td);
+	if (needs_lock)
+		__td_io_u_lock(td);
 
 	add_stat_sample(&ts->iops_stat[io_u->ddir], 1);
 
@@ -2794,7 +2848,9 @@ void add_iops_sample(struct thread_data *td, struct io_u *io_u,
 			       bytes, io_u->offset);
 
 	td->stat_io_blocks[io_u->ddir] = td->this_io_blocks[io_u->ddir];
-	td_io_u_unlock(td);
+
+	if (needs_lock)
+		__td_io_u_unlock(td);
 }
 
 static int add_iops_samples(struct thread_data *td, struct timespec *t)

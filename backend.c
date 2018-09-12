@@ -47,11 +47,11 @@
 #include "rate-submit.h"
 #include "helper_thread.h"
 #include "pshared.h"
-#include "zbc.h"
+#include "zone-dist.h"
 
 static struct fio_sem *startup_sem;
 static struct flist_head *cgroup_list;
-static char *cgroup_mnt;
+static struct cgroup_mnt *cgroup_mnt;
 static int exit_value;
 static volatile int fio_abort;
 static unsigned int nr_process = 0;
@@ -435,9 +435,7 @@ static int wait_for_completions(struct thread_data *td, struct timespec *time)
 	if ((full && !min_evts) || !td->o.iodepth_batch_complete_min)
 		min_evts = 1;
 
-	if (time && (__should_check_rate(td, DDIR_READ) ||
-	    __should_check_rate(td, DDIR_WRITE) ||
-	    __should_check_rate(td, DDIR_TRIM)))
+	if (time && __should_check_rate(td))
 		fio_gettime(time, NULL);
 
 	do {
@@ -459,14 +457,14 @@ int io_queue_event(struct thread_data *td, struct io_u *io_u, int *ret,
 			*ret = -io_u->error;
 			clear_io_u(td, io_u);
 		} else if (io_u->resid) {
-			int bytes = io_u->xfer_buflen - io_u->resid;
+			long long bytes = io_u->xfer_buflen - io_u->resid;
 			struct fio_file *f = io_u->file;
 
 			if (bytes_issued)
 				*bytes_issued += bytes;
 
 			if (!from_verify)
-				trim_io_piece(td, io_u);
+				trim_io_piece(io_u);
 
 			/*
 			 * zero read, fail
@@ -492,9 +490,7 @@ int io_queue_event(struct thread_data *td, struct io_u *io_u, int *ret,
 			requeue_io_u(td, &io_u);
 		} else {
 sync_done:
-			if (comp_time && (__should_check_rate(td, DDIR_READ) ||
-			    __should_check_rate(td, DDIR_WRITE) ||
-			    __should_check_rate(td, DDIR_TRIM)))
+			if (comp_time && __should_check_rate(td))
 				fio_gettime(comp_time, NULL);
 
 			*ret = io_u_sync_complete(td, io_u);
@@ -591,7 +587,7 @@ static bool in_flight_overlap(struct io_u_queue *q, struct io_u *io_u)
 
 			if (x1 < y2 && y1 < x2) {
 				overlap = true;
-				dprint(FD_IO, "in-flight overlap: %llu/%lu, %llu/%lu\n",
+				dprint(FD_IO, "in-flight overlap: %llu/%llu, %llu/%llu\n",
 						x1, io_u->buflen,
 						y1, check_io_u->buflen);
 				break;
@@ -896,6 +892,8 @@ static void handle_thinktime(struct thread_data *td, enum fio_ddir ddir)
 			over = (usperop - total) / usperop * -bs;
 
 		td->rate_io_issue_bytes[ddir] += (missed - over);
+		/* adjust for rate_process=poisson */
+		td->last_usec[ddir] += total;
 	}
 }
 
@@ -972,8 +970,10 @@ static void do_io(struct thread_data *td, uint64_t *bytes_done)
 		 * Break if we exceeded the bytes. The exception is time
 		 * based runs, but we still need to break out of the loop
 		 * for those to run verification, if enabled.
+		 * Jobs read from iolog do not use this stop condition.
 		 */
 		if (bytes_issued >= total_bytes &&
+		    !td->o.read_iolog_file &&
 		    (!td->o.time_based ||
 		     (td->o.time_based && td->o.verify != VERIFY_NONE)))
 			break;
@@ -1039,8 +1039,8 @@ static void do_io(struct thread_data *td, uint64_t *bytes_done)
 			log_io_piece(td, io_u);
 
 		if (td->o.io_submit_mode == IO_MODE_OFFLOAD) {
-			const unsigned long blen = io_u->xfer_buflen;
-			const enum fio_ddir ddir = acct_ddir(io_u);
+			const unsigned long long blen = io_u->xfer_buflen;
+			const enum fio_ddir __ddir = acct_ddir(io_u);
 
 			if (td->error)
 				break;
@@ -1048,14 +1048,14 @@ static void do_io(struct thread_data *td, uint64_t *bytes_done)
 			workqueue_enqueue(&td->io_wq, &io_u->work);
 			ret = FIO_Q_QUEUED;
 
-			if (ddir_rw(ddir)) {
-				td->io_issues[ddir]++;
-				td->io_issue_bytes[ddir] += blen;
-				td->rate_io_issue_bytes[ddir] += blen;
+			if (ddir_rw(__ddir)) {
+				td->io_issues[__ddir]++;
+				td->io_issue_bytes[__ddir] += blen;
+				td->rate_io_issue_bytes[__ddir] += blen;
 			}
 
 			if (should_check_rate(td))
-				td->rate_next_io_time[ddir] = usec_for_io(td, ddir);
+				td->rate_next_io_time[__ddir] = usec_for_io(td, __ddir);
 
 		} else {
 			ret = io_u_submit(td, io_u);
@@ -1205,19 +1205,10 @@ static void cleanup_io_u(struct thread_data *td)
 static int init_io_u(struct thread_data *td)
 {
 	struct io_u *io_u;
-	unsigned int max_bs, min_write;
 	int cl_align, i, max_units;
-	int data_xfer = 1, err;
-	char *p;
+	int err;
 
 	max_units = td->o.iodepth;
-	max_bs = td_max_bs(td);
-	min_write = td->o.min_bs[DDIR_WRITE];
-	td->orig_buffer_size = (unsigned long long) max_bs
-					* (unsigned long long) max_units;
-
-	if (td_ioengine_flagged(td, FIO_NOIO) || !(td_read(td) || td_write(td)))
-		data_xfer = 0;
 
 	err = 0;
 	err += !io_u_rinit(&td->io_u_requeues, td->o.iodepth);
@@ -1228,37 +1219,6 @@ static int init_io_u(struct thread_data *td)
 		log_err("fio: failed setting up IO queues\n");
 		return 1;
 	}
-
-	/*
-	 * if we may later need to do address alignment, then add any
-	 * possible adjustment here so that we don't cause a buffer
-	 * overflow later. this adjustment may be too much if we get
-	 * lucky and the allocator gives us an aligned address.
-	 */
-	if (td->o.odirect || td->o.mem_align || td->o.oatomic ||
-	    td_ioengine_flagged(td, FIO_RAWIO))
-		td->orig_buffer_size += page_mask + td->o.mem_align;
-
-	if (td->o.mem_type == MEM_SHMHUGE || td->o.mem_type == MEM_MMAPHUGE) {
-		unsigned long bs;
-
-		bs = td->orig_buffer_size + td->o.hugepage_size - 1;
-		td->orig_buffer_size = bs & ~(td->o.hugepage_size - 1);
-	}
-
-	if (td->orig_buffer_size != (size_t) td->orig_buffer_size) {
-		log_err("fio: IO memory too large. Reduce max_bs or iodepth\n");
-		return 1;
-	}
-
-	if (data_xfer && allocate_io_mem(td))
-		return 1;
-
-	if (td->o.odirect || td->o.mem_align || td->o.oatomic ||
-	    td_ioengine_flagged(td, FIO_RAWIO))
-		p = PTR_ALIGN(td->orig_buffer, page_mask) + td->o.mem_align;
-	else
-		p = td->orig_buffer;
 
 	cl_align = os_cache_line_size();
 
@@ -1279,21 +1239,6 @@ static int init_io_u(struct thread_data *td)
 		INIT_FLIST_HEAD(&io_u->verify_list);
 		dprint(FD_MEM, "io_u alloc %p, index %u\n", io_u, i);
 
-		if (data_xfer) {
-			io_u->buf = p;
-			dprint(FD_MEM, "io_u %p, mem %p\n", io_u, io_u->buf);
-
-			if (td_write(td))
-				io_u_fill_buffer(td, io_u, min_write, max_bs);
-			if (td_write(td) && td->o.verify_pattern_bytes) {
-				/*
-				 * Fill the buffer with the pattern if we are
-				 * going to be doing writes.
-				 */
-				fill_verify_pattern(td, io_u->buf, max_bs, io_u, 0, 0);
-			}
-		}
-
 		io_u->index = i;
 		io_u->flags = IO_U_F_FREE;
 		io_u_qpush(&td->io_u_freelist, io_u);
@@ -1312,12 +1257,84 @@ static int init_io_u(struct thread_data *td)
 				return 1;
 			}
 		}
-
-		p += max_bs;
 	}
+
+	init_io_u_buffers(td);
 
 	if (init_file_completion_logging(td, max_units))
 		return 1;
+
+	return 0;
+}
+
+int init_io_u_buffers(struct thread_data *td)
+{
+	struct io_u *io_u;
+	unsigned long long max_bs, min_write;
+	int i, max_units;
+	int data_xfer = 1;
+	char *p;
+
+	max_units = td->o.iodepth;
+	max_bs = td_max_bs(td);
+	min_write = td->o.min_bs[DDIR_WRITE];
+	td->orig_buffer_size = (unsigned long long) max_bs
+					* (unsigned long long) max_units;
+
+	if (td_ioengine_flagged(td, FIO_NOIO) || !(td_read(td) || td_write(td)))
+		data_xfer = 0;
+
+	/*
+	 * if we may later need to do address alignment, then add any
+	 * possible adjustment here so that we don't cause a buffer
+	 * overflow later. this adjustment may be too much if we get
+	 * lucky and the allocator gives us an aligned address.
+	 */
+	if (td->o.odirect || td->o.mem_align || td->o.oatomic ||
+	    td_ioengine_flagged(td, FIO_RAWIO))
+		td->orig_buffer_size += page_mask + td->o.mem_align;
+
+	if (td->o.mem_type == MEM_SHMHUGE || td->o.mem_type == MEM_MMAPHUGE) {
+		unsigned long long bs;
+
+		bs = td->orig_buffer_size + td->o.hugepage_size - 1;
+		td->orig_buffer_size = bs & ~(td->o.hugepage_size - 1);
+	}
+
+	if (td->orig_buffer_size != (size_t) td->orig_buffer_size) {
+		log_err("fio: IO memory too large. Reduce max_bs or iodepth\n");
+		return 1;
+	}
+
+	if (data_xfer && allocate_io_mem(td))
+		return 1;
+
+	if (td->o.odirect || td->o.mem_align || td->o.oatomic ||
+	    td_ioengine_flagged(td, FIO_RAWIO))
+		p = PTR_ALIGN(td->orig_buffer, page_mask) + td->o.mem_align;
+	else
+		p = td->orig_buffer;
+
+	for (i = 0; i < max_units; i++) {
+		io_u = td->io_u_all.io_us[i];
+		dprint(FD_MEM, "io_u alloc %p, index %u\n", io_u, i);
+
+		if (data_xfer) {
+			io_u->buf = p;
+			dprint(FD_MEM, "io_u %p, mem %p\n", io_u, io_u->buf);
+
+			if (td_write(td))
+				io_u_fill_buffer(td, io_u, min_write, max_bs);
+			if (td_write(td) && td->o.verify_pattern_bytes) {
+				/*
+				 * Fill the buffer with the pattern if we are
+				 * going to be doing writes.
+				 */
+				fill_verify_pattern(td, io_u->buf, max_bs, io_u, 0, 0);
+			}
+		}
+		p += max_bs;
+	}
 
 	return 0;
 }
@@ -1535,7 +1552,7 @@ static void *thread_main(void *data)
 	} else
 		td->pid = gettid();
 
-	fio_local_clock_init(o->use_thread);
+	fio_local_clock_init();
 
 	dprint(FD_PROCESS, "jobs pid=%d started\n", (int) td->pid);
 
@@ -1578,6 +1595,8 @@ static void *thread_main(void *data)
 		td_verror(td, errno, "setuid");
 		goto err;
 	}
+
+	td_zone_gen_index(td);
 
 	/*
 	 * Do this early, we don't want the compress threads to be limited
@@ -1892,17 +1911,9 @@ err:
 	close_and_free_files(td);
 	cleanup_io_u(td);
 	close_ioengine(td);
-	cgroup_shutdown(td, &cgroup_mnt);
+	cgroup_shutdown(td, cgroup_mnt);
 	verify_free_state(td);
-
-	if (td->zone_state_index) {
-		int i;
-
-		for (i = 0; i < DDIR_RWDIR_CNT; i++)
-			free(td->zone_state_index[i]);
-		free(td->zone_state_index);
-		td->zone_state_index = NULL;
-	}
+	td_zone_free_index(td);
 
 	if (fio_option_is_set(o, cpumask)) {
 		ret = fio_cpuset_exit(&o->cpumask);
@@ -1915,6 +1926,8 @@ err:
 	 */
 	if (o->write_iolog_file)
 		write_iolog_close(td);
+	if (td->io_log_rfile)
+		fclose(td->io_log_rfile);
 
 	td_set_runstate(td, TD_EXITED);
 
@@ -2203,18 +2216,22 @@ static void run_threads(struct sk_out *sk_out)
 	}
 
 	if (output_format & FIO_OUTPUT_NORMAL) {
-		log_info("Starting ");
+		struct buf_output out;
+
+		buf_output_init(&out);
+		__log_buf(&out, "Starting ");
 		if (nr_thread)
-			log_info("%d thread%s", nr_thread,
+			__log_buf(&out, "%d thread%s", nr_thread,
 						nr_thread > 1 ? "s" : "");
 		if (nr_process) {
 			if (nr_thread)
-				log_info(" and ");
-			log_info("%d process%s", nr_process,
+				__log_buf(&out, " and ");
+			__log_buf(&out, "%d process%s", nr_process,
 						nr_process > 1 ? "es" : "");
 		}
-		log_info("\n");
-		log_info_flush();
+		__log_buf(&out, "\n");
+		log_info_buf(out.buf, out.buflen);
+		buf_output_free(&out);
 	}
 
 	todo = thread_number;
@@ -2471,6 +2488,8 @@ int fio_backend(struct sk_out *sk_out)
 	}
 
 	startup_sem = fio_sem_init(FIO_SEM_LOCKED);
+	if (!sk_out)
+		is_local_backend = true;
 	if (startup_sem == NULL)
 		return 1;
 
@@ -2514,7 +2533,6 @@ int fio_backend(struct sk_out *sk_out)
 		cgroup_kill(cgroup_list);
 		sfree(cgroup_list);
 	}
-	sfree(cgroup_mnt);
 
 	fio_sem_remove(startup_sem);
 	stat_exit();

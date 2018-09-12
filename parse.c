@@ -26,12 +26,14 @@
 static const char *opt_type_names[] = {
 	"OPT_INVALID",
 	"OPT_STR",
+	"OPT_STR_ULL",
 	"OPT_STR_MULTI",
 	"OPT_STR_VAL",
 	"OPT_STR_VAL_TIME",
 	"OPT_STR_STORE",
 	"OPT_RANGE",
 	"OPT_INT",
+	"OPT_ULL",
 	"OPT_BOOL",
 	"OPT_FLOAT_LIST",
 	"OPT_STR_SET",
@@ -69,7 +71,7 @@ static void posval_sort(const struct fio_option *o, struct value_pair *vpmap)
 }
 
 static void show_option_range(const struct fio_option *o,
-			      size_t (*logger)(const char *format, ...))
+			      ssize_t (*logger)(const char *format, ...))
 {
 	if (o->type == FIO_OPT_FLOAT_LIST) {
 		const char *sep = "";
@@ -118,21 +120,24 @@ static void show_option_values(const struct fio_option *o)
 static void show_option_help(const struct fio_option *o, int is_err)
 {
 	const char *typehelp[] = {
-		"invalid",
-		"string (opt=bla)",
-		"string (opt=bla)",
-		"string with possible k/m/g postfix (opt=4k)",
-		"string with time postfix (opt=10s)",
-		"string (opt=bla)",
-		"string with dual range (opt=1k-4k,4k-8k)",
-		"integer value (opt=100)",
-		"boolean value (opt=1)",
-		"list of floating point values separated by ':' (opt=5.9:7.8)",
-		"no argument (opt)",
-		"deprecated",
-		"unsupported",
+		[FIO_OPT_INVALID]	  = "invalid",
+		[FIO_OPT_STR]		  = "string (opt=bla)",
+		[FIO_OPT_STR_ULL]	  = "string (opt=bla)",
+		[FIO_OPT_STR_MULTI]	  = "string with possible k/m/g postfix (opt=4k)",
+		[FIO_OPT_STR_VAL]	  = "string (opt=bla)",
+		[FIO_OPT_STR_VAL_TIME]	  = "string with time postfix (opt=10s)",
+		[FIO_OPT_STR_STORE]	  = "string (opt=bla)",
+		[FIO_OPT_RANGE]		  = "one to three ranges (opt=1k-4k[,4k-8k[,1k-8k]])",
+		[FIO_OPT_INT]		  = "integer value (opt=100)",
+		[FIO_OPT_ULL]		  = "integer value (opt=100)",
+		[FIO_OPT_BOOL]		  = "boolean value (opt=1)",
+		[FIO_OPT_FLOAT_LIST]	  = "list of floating point values separated by ':' (opt=5.9:7.8)",
+		[FIO_OPT_STR_SET]	  = "empty or boolean value ([0|1])",
+		[FIO_OPT_DEPRECATED]	  = "deprecated",
+		[FIO_OPT_SOFT_DEPRECATED] = "deprecated",
+		[FIO_OPT_UNSUPPORTED]	  = "unsupported",
 	};
-	size_t (*logger)(const char *format, ...);
+	ssize_t (*logger)(const char *format, ...);
 
 	if (is_err)
 		logger = log_err;
@@ -438,7 +443,7 @@ void strip_blank_end(char *p)
 	*(s + 1) = '\0';
 }
 
-static int check_range_bytes(const char *str, long *val, void *data)
+static int check_range_bytes(const char *str, long long *val, void *data)
 {
 	long long __val;
 
@@ -507,7 +512,8 @@ static int __handle_option(const struct fio_option *o, const char *ptr,
 	int il=0, *ilp;
 	fio_fp64_t *flp;
 	long long ull, *ullp;
-	long ul1, ul2;
+	long ul2;
+	long long ull1, ull2;
 	double uf;
 	char **cp = NULL;
 	int ret = 0, is_time = 0;
@@ -525,6 +531,7 @@ static int __handle_option(const struct fio_option *o, const char *ptr,
 
 	switch (o->type) {
 	case FIO_OPT_STR:
+	case FIO_OPT_STR_ULL:
 	case FIO_OPT_STR_MULTI: {
 		fio_opt_str_fn *fn = o->cb;
 
@@ -540,7 +547,11 @@ static int __handle_option(const struct fio_option *o, const char *ptr,
 				break;
 			if (!strncmp(vp->ival, ptr, str_match_len(vp, ptr))) {
 				ret = 0;
-				if (o->off1)
+				if (!o->off1)
+					continue;
+				if (o->type == FIO_OPT_STR_ULL)
+					val_store(ullp, vp->oval, o->off1, vp->orval, data, o);
+				else
 					val_store(ilp, vp->oval, o->off1, vp->orval, data, o);
 				continue;
 			}
@@ -554,6 +565,8 @@ static int __handle_option(const struct fio_option *o, const char *ptr,
 	}
 	case FIO_OPT_STR_VAL_TIME:
 		is_time = 1;
+		/* fall through */
+	case FIO_OPT_ULL:
 	case FIO_OPT_INT:
 	case FIO_OPT_STR_VAL: {
 		fio_opt_str_val_fn *fn = o->cb;
@@ -584,7 +597,7 @@ static int __handle_option(const struct fio_option *o, const char *ptr,
 
 		if (o->maxval && ull > o->maxval) {
 			log_err("max value out of range: %llu"
-					" (%u max)\n", ull, o->maxval);
+					" (%llu max)\n", ull, o->maxval);
 			return 1;
 		}
 		if (o->minval && ull < o->minval) {
@@ -634,6 +647,27 @@ static int __handle_option(const struct fio_option *o, const char *ptr,
 					if (curr < 2) {
 						if (o->off3)
 							val_store(ilp, ull, o->off3, 0, data, o);
+					}
+				}
+			} else if (o->type == FIO_OPT_ULL) {
+				if (first)
+					val_store(ullp, ull, o->off1, 0, data, o);
+				if (curr == 1) {
+					if (o->off2)
+						val_store(ullp, ull, o->off2, 0, data, o);
+				}
+				if (curr == 2) {
+					if (o->off3)
+						val_store(ullp, ull, o->off3, 0, data, o);
+				}
+				if (!more) {
+					if (curr < 1) {
+						if (o->off2)
+							val_store(ullp, ull, o->off2, 0, data, o);
+					}
+					if (curr < 2) {
+						if (o->off3)
+							val_store(ullp, ull, o->off3, 0, data, o);
 					}
 				}
 			} else {
@@ -790,43 +824,43 @@ static int __handle_option(const struct fio_option *o, const char *ptr,
 		p1 = tmp;
 
 		ret = 1;
-		if (!check_range_bytes(p1, &ul1, data) &&
-		    !check_range_bytes(p2, &ul2, data)) {
+		if (!check_range_bytes(p1, &ull1, data) &&
+			!check_range_bytes(p2, &ull2, data)) {
 			ret = 0;
-			if (ul1 > ul2) {
-				unsigned long foo = ul1;
+			if (ull1 > ull2) {
+				unsigned long long foo = ull1;
 
-				ul1 = ul2;
-				ul2 = foo;
+				ull1 = ull2;
+				ull2 = foo;
 			}
 
 			if (first) {
-				val_store(ilp, ul1, o->off1, 0, data, o);
-				val_store(ilp, ul2, o->off2, 0, data, o);
+				val_store(ullp, ull1, o->off1, 0, data, o);
+				val_store(ullp, ull2, o->off2, 0, data, o);
 			}
 			if (curr == 1) {
 				if (o->off3 && o->off4) {
-					val_store(ilp, ul1, o->off3, 0, data, o);
-					val_store(ilp, ul2, o->off4, 0, data, o);
+					val_store(ullp, ull1, o->off3, 0, data, o);
+					val_store(ullp, ull2, o->off4, 0, data, o);
 				}
 			}
 			if (curr == 2) {
 				if (o->off5 && o->off6) {
-					val_store(ilp, ul1, o->off5, 0, data, o);
-					val_store(ilp, ul2, o->off6, 0, data, o);
+					val_store(ullp, ull1, o->off5, 0, data, o);
+					val_store(ullp, ull2, o->off6, 0, data, o);
 				}
 			}
 			if (!more) {
 				if (curr < 1) {
 					if (o->off3 && o->off4) {
-						val_store(ilp, ul1, o->off3, 0, data, o);
-						val_store(ilp, ul2, o->off4, 0, data, o);
+						val_store(ullp, ull1, o->off3, 0, data, o);
+						val_store(ullp, ull2, o->off4, 0, data, o);
 					}
 				}
 				if (curr < 2) {
 					if (o->off5 && o->off6) {
-						val_store(ilp, ul1, o->off5, 0, data, o);
-						val_store(ilp, ul2, o->off6, 0, data, o);
+						val_store(ullp, ull1, o->off5, 0, data, o);
+						val_store(ullp, ull2, o->off6, 0, data, o);
 					}
 				}
 			}
@@ -851,7 +885,7 @@ static int __handle_option(const struct fio_option *o, const char *ptr,
 			break;
 
 		if (o->maxval && il > (int) o->maxval) {
-			log_err("max value out of range: %d (%d max)\n",
+			log_err("max value out of range: %d (%llu max)\n",
 								il, o->maxval);
 			return 1;
 		}
@@ -878,6 +912,7 @@ static int __handle_option(const struct fio_option *o, const char *ptr,
 	}
 	case FIO_OPT_DEPRECATED:
 		ret = 1;
+		/* fall through */
 	case FIO_OPT_SOFT_DEPRECATED:
 		log_info("Option %s is deprecated\n", o->name);
 		break;
@@ -927,6 +962,7 @@ static int handle_option(const struct fio_option *o, const char *__ptr,
 		if (ptr &&
 		    (o->type != FIO_OPT_STR_STORE) &&
 		    (o->type != FIO_OPT_STR) &&
+		    (o->type != FIO_OPT_STR_ULL) &&
 		    (o->type != FIO_OPT_FLOAT_LIST)) {
 			ptr2 = strchr(ptr, ',');
 			if (ptr2 && *(ptr2 + 1) == '\0')
@@ -1325,6 +1361,10 @@ static void option_init(struct fio_option *o)
 		if (!o->maxval)
 			o->maxval = UINT_MAX;
 	}
+	if (o->type == FIO_OPT_ULL) {
+		if (!o->maxval)
+			o->maxval = ULLONG_MAX;
+	}
 	if (o->type == FIO_OPT_STR_SET && o->def && !o->no_warn_def) {
 		log_err("Option %s: string set option with"
 				" default will always be true\n", o->name);
@@ -1336,9 +1376,6 @@ static void option_init(struct fio_option *o)
 		o->category = FIO_OPT_C_GENERAL;
 		o->group = FIO_OPT_G_INVALID;
 	}
-	if (o->type == FIO_OPT_STR || o->type == FIO_OPT_STR_STORE ||
-	    o->type == FIO_OPT_STR_MULTI)
-		return;
 }
 
 /*

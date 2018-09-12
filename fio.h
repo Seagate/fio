@@ -44,6 +44,7 @@
 #include "io_u_queue.h"
 #include "workqueue.h"
 #include "steadystate.h"
+#include "lib/nowarn_snprintf.h"
 
 #ifdef CONFIG_SOLARISAIO
 #include <sys/asynch.h>
@@ -166,7 +167,7 @@ struct zone_split_index {
 	uint64_t size_prev;
 };
 
-#define FIO_MAX_OPEN_ZBC_ZONES 128
+#define FIO_MAX_OPEN_ZBD_ZONES 128
 
 /*
  * This describes a single thread/process executing a fio job.
@@ -401,6 +402,11 @@ struct thread_data {
 	 * For IO replaying
 	 */
 	struct flist_head io_log_list;
+	FILE *io_log_rfile;
+	unsigned int io_log_current;
+	unsigned int io_log_checkmark;
+	unsigned int io_log_highmark;
+	struct timespec io_log_highmark_time;
 
 	/*
 	 * For tracking/handling discards
@@ -451,7 +457,7 @@ struct thread_data {
 	CUdevice  cu_dev;
 	CUcontext cu_ctx;
 	CUdeviceptr dev_mem_ptr;
-#endif	
+#endif
 
 };
 
@@ -471,7 +477,9 @@ enum {
 			break;						\
 		(td)->error = ____e;					\
 		if (!(td)->first_error)					\
-			snprintf(td->verror, sizeof(td->verror), "file:%s:%d, func=%s, error=%s", __FILE__, __LINE__, (func), (msg));		\
+			nowarn_snprintf(td->verror, sizeof(td->verror),	\
+					"file:%s:%d, func=%s, error=%s", \
+					__FILE__, __LINE__, (func), (msg)); \
 	} while (0)
 
 
@@ -517,6 +525,7 @@ extern int fio_clock_source_set;
 extern int warnings_fatal;
 extern int terse_version;
 extern int is_backend;
+extern int is_local_backend;
 extern int nr_clients;
 extern int log_syslog;
 extern int status_interval;
@@ -529,23 +538,29 @@ extern char *aux_path;
 
 extern struct thread_data *threads;
 
+static inline bool is_running_backend(void)
+{
+	return is_backend || is_local_backend;
+}
+
 extern bool eta_time_within_slack(unsigned int time);
 
 static inline void fio_ro_check(const struct thread_data *td, struct io_u *io_u)
 {
-	assert(!(io_u->ddir == DDIR_WRITE && !td_write(td)));
+	assert(!(io_u->ddir == DDIR_WRITE && !td_write(td)) &&
+	       !(io_u->ddir == DDIR_TRIM && !td_trim(td)));
 }
 
 #define REAL_MAX_JOBS		4096
 
-static inline int should_fsync(struct thread_data *td)
+static inline bool should_fsync(struct thread_data *td)
 {
 	if (td->last_was_sync)
-		return 0;
+		return false;
 	if (td_write(td) || td->o.override_sync)
-		return 1;
+		return true;
 
-	return 0;
+	return false;
 }
 
 /*
@@ -567,6 +582,7 @@ extern void fio_fill_default_options(struct thread_data *);
 extern int fio_show_option_help(const char *);
 extern void fio_options_set_ioengine_opts(struct option *long_options, struct thread_data *td);
 extern void fio_options_dup_and_init(struct option *);
+extern char *fio_option_dup_subs(const char *);
 extern void fio_options_mem_dupe(struct thread_data *);
 extern void td_fill_rand_seeds(struct thread_data *);
 extern void td_fill_verify_state_seed(struct thread_data *);
@@ -721,35 +737,30 @@ static inline bool option_check_rate(struct thread_data *td, enum fio_ddir ddir)
 	return false;
 }
 
-static inline bool __should_check_rate(struct thread_data *td,
-				       enum fio_ddir ddir)
+static inline bool __should_check_rate(struct thread_data *td)
 {
 	return (td->flags & TD_F_CHECK_RATE) != 0;
 }
 
 static inline bool should_check_rate(struct thread_data *td)
 {
-	if (__should_check_rate(td, DDIR_READ) && td->bytes_done[DDIR_READ])
-		return true;
-	if (__should_check_rate(td, DDIR_WRITE) && td->bytes_done[DDIR_WRITE])
-		return true;
-	if (__should_check_rate(td, DDIR_TRIM) && td->bytes_done[DDIR_TRIM])
-		return true;
+	if (!__should_check_rate(td))
+		return false;
 
-	return false;
+	return ddir_rw_sum(td->bytes_done) != 0;
 }
 
-static inline unsigned int td_max_bs(struct thread_data *td)
+static inline unsigned long long td_max_bs(struct thread_data *td)
 {
-	unsigned int max_bs;
+	unsigned long long max_bs;
 
 	max_bs = max(td->o.max_bs[DDIR_READ], td->o.max_bs[DDIR_WRITE]);
 	return max(td->o.max_bs[DDIR_TRIM], max_bs);
 }
 
-static inline unsigned int td_min_bs(struct thread_data *td)
+static inline unsigned long long td_min_bs(struct thread_data *td)
 {
-	unsigned int min_bs;
+	unsigned long long min_bs;
 
 	min_bs = min(td->o.min_bs[DDIR_READ], td->o.min_bs[DDIR_WRITE]);
 	return min(td->o.min_bs[DDIR_TRIM], min_bs);
@@ -764,16 +775,14 @@ static inline bool td_async_processing(struct thread_data *td)
  * We currently only need to do locking if we have verifier threads
  * accessing our internal structures too
  */
-static inline void td_io_u_lock(struct thread_data *td)
+static inline void __td_io_u_lock(struct thread_data *td)
 {
-	if (td_async_processing(td))
-		pthread_mutex_lock(&td->io_u_lock);
+	pthread_mutex_lock(&td->io_u_lock);
 }
 
-static inline void td_io_u_unlock(struct thread_data *td)
+static inline void __td_io_u_unlock(struct thread_data *td)
 {
-	if (td_async_processing(td))
-		pthread_mutex_unlock(&td->io_u_lock);
+	pthread_mutex_unlock(&td->io_u_lock);
 }
 
 static inline void td_io_u_free_notify(struct thread_data *td)

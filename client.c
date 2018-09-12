@@ -28,10 +28,11 @@ static void handle_ts(struct fio_client *client, struct fio_net_cmd *cmd);
 static void handle_gs(struct fio_client *client, struct fio_net_cmd *cmd);
 static void handle_probe(struct fio_client *client, struct fio_net_cmd *cmd);
 static void handle_text(struct fio_client *client, struct fio_net_cmd *cmd);
-static void handle_stop(struct fio_client *client, struct fio_net_cmd *cmd);
+static void handle_stop(struct fio_client *client);
 static void handle_start(struct fio_client *client, struct fio_net_cmd *cmd);
 
 static void convert_text(struct fio_net_cmd *cmd);
+static void client_display_thread_status(struct jobs_eta *je);
 
 struct client_ops fio_client_ops = {
 	.text		= handle_text,
@@ -40,7 +41,7 @@ struct client_ops fio_client_ops = {
 	.group_stats	= handle_gs,
 	.stop		= handle_stop,
 	.start		= handle_start,
-	.eta		= display_thread_status,
+	.eta		= client_display_thread_status,
 	.probe		= handle_probe,
 	.eta_msec	= FIO_CLIENT_DEF_ETA_MSEC,
 	.client_type	= FIO_CLIENT_TYPE_CLI,
@@ -118,6 +119,58 @@ static int read_data(int fd, void *data, size_t size)
 	return 0;
 }
 
+static int read_ini_data(int fd, void *data, size_t size)
+{
+	char *p = data;
+	int ret = 0;
+	FILE *fp;
+	int dupfd;
+
+	dupfd = dup(fd);
+	if (dupfd < 0)
+		return errno;
+
+	fp = fdopen(dupfd, "r");
+	if (!fp) {
+		ret = errno;
+		close(dupfd);
+		goto out;
+	}
+
+	while (1) {
+		ssize_t len;
+		char buf[OPT_LEN_MAX+1], *sub;
+
+		if (!fgets(buf, sizeof(buf), fp)) {
+			if (ferror(fp)) {
+				if (errno == EAGAIN || errno == EINTR)
+					continue;
+				ret = errno;
+			}
+			break;
+		}
+
+		sub = fio_option_dup_subs(buf);
+		len = strlen(sub);
+		if (len + 1 > size) {
+			log_err("fio: no space left to read data\n");
+			free(sub);
+			ret = ENOSPC;
+			break;
+		}
+
+		memcpy(p, sub, len);
+		free(sub);
+		p += len;
+		*p = '\0';
+		size -= len;
+	}
+
+	fclose(fp);
+out:
+	return ret;
+}
+
 static void fio_client_json_init(void)
 {
 	char time_buf[32];
@@ -145,14 +198,23 @@ static void fio_client_json_init(void)
 
 static void fio_client_json_fini(void)
 {
-	if (!(output_format & FIO_OUTPUT_JSON))
+	struct buf_output out;
+
+	if (!root)
 		return;
 
-	log_info("\n");
-	json_print_object(root, NULL);
-	log_info("\n");
+	buf_output_init(&out);
+
+	__log_buf(&out, "\n");
+	json_print_object(root, &out);
+	__log_buf(&out, "\n");
+	log_info_buf(out.buf, out.buflen);
+
+	buf_output_free(&out);
+
 	json_free_object(root);
 	root = NULL;
+	job_opt_object = NULL;
 	clients_array = NULL;
 	du_array = NULL;
 }
@@ -179,6 +241,9 @@ void fio_put_client(struct fio_client *client)
 {
 	if (--client->refs)
 		return;
+
+	log_info_buf(client->buf.buf, client->buf.buflen);
+	buf_output_free(&client->buf);
 
 	free(client->hostname);
 	if (client->argv)
@@ -298,9 +363,7 @@ void fio_client_add_cmd_option(void *cookie, const char *opt)
 	}
 }
 
-struct fio_client *fio_client_add_explicit(struct client_ops *ops,
-					   const char *hostname, int type,
-					   int port)
+static struct fio_client *get_new_client(void)
 {
 	struct fio_client *client;
 
@@ -312,6 +375,19 @@ struct fio_client *fio_client_add_explicit(struct client_ops *ops,
 	INIT_FLIST_HEAD(&client->arg_list);
 	INIT_FLIST_HEAD(&client->eta_list);
 	INIT_FLIST_HEAD(&client->cmd_list);
+
+	buf_output_init(&client->buf);
+
+	return client;
+}
+
+struct fio_client *fio_client_add_explicit(struct client_ops *ops,
+					   const char *hostname, int type,
+					   int port)
+{
+	struct fio_client *client;
+
+	client = get_new_client();
 
 	client->hostname = strdup(hostname);
 
@@ -388,14 +464,7 @@ int fio_client_add(struct client_ops *ops, const char *hostname, void **cookie)
 		}
 	}
 
-	client = malloc(sizeof(*client));
-	memset(client, 0, sizeof(*client));
-
-	INIT_FLIST_HEAD(&client->list);
-	INIT_FLIST_HEAD(&client->hash_list);
-	INIT_FLIST_HEAD(&client->arg_list);
-	INIT_FLIST_HEAD(&client->eta_list);
-	INIT_FLIST_HEAD(&client->cmd_list);
+	client = get_new_client();
 
 	if (fio_server_parse_string(hostname, &client->hostname,
 					&client->is_sock, &client->port,
@@ -763,13 +832,17 @@ static int __fio_client_send_local_ini(struct fio_client *client,
 		return ret;
 	}
 
+	/*
+	 * Add extra space for variable expansion, but doesn't guarantee.
+	 */
+	sb.st_size += OPT_LEN_MAX;
 	p_size = sb.st_size + sizeof(*pdu);
 	pdu = malloc(p_size);
 	buf = pdu->buf;
 
 	len = sb.st_size;
 	p = buf;
-	if (read_data(fd, p, len)) {
+	if (read_ini_data(fd, p, len)) {
 		log_err("fio: failed reading job file %s\n", filename);
 		close(fd);
 		free(pdu);
@@ -1005,7 +1078,7 @@ static void handle_ts(struct fio_client *client, struct fio_net_cmd *cmd)
 	if (client->opt_lists && p->ts.thread_number <= client->jobs)
 		opt_list = &client->opt_lists[p->ts.thread_number - 1];
 
-	tsobj = show_thread_status(&p->ts, &p->rs, opt_list, NULL);
+	tsobj = show_thread_status(&p->ts, &p->rs, opt_list, &client->buf);
 	client->did_stat = true;
 	if (tsobj) {
 		json_object_add_client_info(tsobj, client);
@@ -1026,7 +1099,7 @@ static void handle_ts(struct fio_client *client, struct fio_net_cmd *cmd)
 
 	if (++sum_stat_nr == sum_stat_clients) {
 		strcpy(client_ts.name, "All clients");
-		tsobj = show_thread_status(&client_ts, &client_gs, NULL, NULL);
+		tsobj = show_thread_status(&client_ts, &client_gs, NULL, &client->buf);
 		if (tsobj) {
 			json_object_add_client_info(tsobj, client);
 			json_array_add_value_object(clients_array, tsobj);
@@ -1039,7 +1112,7 @@ static void handle_gs(struct fio_client *client, struct fio_net_cmd *cmd)
 	struct group_run_stats *gs = (struct group_run_stats *) cmd->payload;
 
 	if (output_format & FIO_OUTPUT_NORMAL)
-		show_group_stats(gs, NULL);
+		show_group_stats(gs, &client->buf);
 }
 
 static void handle_job_opt(struct fio_client *client, struct fio_net_cmd *cmd)
@@ -1081,13 +1154,17 @@ static void handle_text(struct fio_client *client, struct fio_net_cmd *cmd)
 	const char *buf = (const char *) pdu->buf;
 	const char *name;
 	int fio_unused ret;
+	struct buf_output out;
+
+	buf_output_init(&out);
 
 	name = client->name ? client->name : client->hostname;
 
-	if (!client->skip_newline)
-		fprintf(f_out, "<%s> ", name);
-	ret = fwrite(buf, pdu->buf_len, 1, f_out);
-	fflush(f_out);
+	if (!client->skip_newline && !(output_format & FIO_OUTPUT_TERSE))
+		__log_buf(&out, "<%s> ", name);
+	__log_buf(&out, "%s", buf);
+	log_info_buf(out.buf, out.buflen);
+	buf_output_free(&out);
 	client->skip_newline = strchr(buf, '\n') == NULL;
 }
 
@@ -1128,21 +1205,21 @@ static void handle_du(struct fio_client *client, struct fio_net_cmd *cmd)
 {
 	struct cmd_du_pdu *du = (struct cmd_du_pdu *) cmd->payload;
 
-	if (!client->disk_stats_shown) {
+	if (!client->disk_stats_shown)
 		client->disk_stats_shown = true;
-		log_info("\nDisk stats (read/write):\n");
-	}
 
 	if (output_format & FIO_OUTPUT_JSON) {
 		struct json_object *duobj;
+
 		json_array_add_disk_util(&du->dus, &du->agg, du_array);
 		duobj = json_array_last_value_object(du_array);
 		json_object_add_client_info(duobj, client);
+	} else if (output_format & FIO_OUTPUT_TERSE)
+		print_disk_util(&du->dus, &du->agg, 1, &client->buf);
+	else if (output_format & FIO_OUTPUT_NORMAL) {
+		__log_buf(&client->buf, "\nDisk stats (read/write):\n");
+		print_disk_util(&du->dus, &du->agg, 0, &client->buf);
 	}
-	if (output_format & FIO_OUTPUT_TERSE)
-		print_disk_util(&du->dus, &du->agg, 1, NULL);
-	if (output_format & FIO_OUTPUT_NORMAL)
-		print_disk_util(&du->dus, &du->agg, 0, NULL);
 }
 
 static void convert_jobs_eta(struct jobs_eta *je)
@@ -1301,8 +1378,8 @@ static void client_flush_hist_samples(FILE *f, int hist_coarseness, void *sample
 		entry = s->data.plat_entry;
 		io_u_plat = entry->io_u_plat;
 
-		fprintf(f, "%lu, %u, %u, ", (unsigned long) s->time,
-						io_sample_ddir(s), s->bs);
+		fprintf(f, "%lu, %u, %llu, ", (unsigned long) s->time,
+						io_sample_ddir(s), (unsigned long long) s->bs);
 		for (j = 0; j < FIO_IO_U_PLAT_NR - stride; j += stride) {
 			fprintf(f, "%llu, ", (unsigned long long)hist_sum(j, stride, io_u_plat, NULL));
 		}
@@ -1411,9 +1488,11 @@ static void handle_probe(struct fio_client *client, struct fio_net_cmd *cmd)
 	sprintf(bit, "%d-bit", probe->bpp * 8);
 	probe->flags = le64_to_cpu(probe->flags);
 
-	log_info("hostname=%s, be=%u, %s, os=%s, arch=%s, fio=%s, flags=%lx\n",
-		probe->hostname, probe->bigendian, bit, os, arch,
-		probe->fio_version, (unsigned long) probe->flags);
+	if (output_format & FIO_OUTPUT_NORMAL) {
+		log_info("hostname=%s, be=%u, %s, os=%s, arch=%s, fio=%s, flags=%lx\n",
+			probe->hostname, probe->bigendian, bit, os, arch,
+			probe->fio_version, (unsigned long) probe->flags);
+	}
 
 	if (!client->name)
 		client->name = strdup((char *) probe->hostname);
@@ -1441,7 +1520,7 @@ static void handle_start(struct fio_client *client, struct fio_net_cmd *cmd)
 	sum_stat_clients += client->nr_stat;
 }
 
-static void handle_stop(struct fio_client *client, struct fio_net_cmd *cmd)
+static void handle_stop(struct fio_client *client)
 {
 	if (client->error)
 		log_info("client <%s>: exited with error %d\n", client->hostname, client->error);
@@ -1470,7 +1549,7 @@ static struct cmd_iolog_pdu *convert_iolog_gz(struct fio_net_cmd *cmd,
 #ifdef CONFIG_ZLIB
 	struct cmd_iolog_pdu *ret;
 	z_stream stream;
-	uint32_t nr_samples;
+	uint64_t nr_samples;
 	size_t total;
 	char *p;
 
@@ -1591,7 +1670,7 @@ static struct cmd_iolog_pdu *convert_iolog(struct fio_net_cmd *cmd,
 		s->time		= le64_to_cpu(s->time);
 		s->data.val	= le64_to_cpu(s->data.val);
 		s->__ddir	= le32_to_cpu(s->__ddir);
-		s->bs		= le32_to_cpu(s->bs);
+		s->bs		= le64_to_cpu(s->bs);
 
 		if (ret->log_offset) {
 			struct io_sample_offset *so = (void *) s;
@@ -1744,7 +1823,7 @@ int fio_handle_client(struct fio_client *client)
 		client->state = Client_stopped;
 		client->error = le32_to_cpu(pdu->error);
 		client->signal = le32_to_cpu(pdu->signal);
-		ops->stop(client, cmd);
+		ops->stop(client);
 		break;
 		}
 	case FIO_NET_CMD_ADD_JOB: {
@@ -2045,4 +2124,10 @@ int fio_handle_clients(struct client_ops *ops)
 
 	free(pfds);
 	return retval || error_clients;
+}
+
+static void client_display_thread_status(struct jobs_eta *je)
+{
+	if (!(output_format & FIO_OUTPUT_JSON))
+		display_thread_status(je);
 }

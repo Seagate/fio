@@ -212,7 +212,7 @@ struct thread_stat {
 	uint32_t first_error;
 	uint64_t total_err_count;
 
-	/* ZBC stats */
+	/* ZBD stats */
 	uint64_t nr_zone_resets;
 
 	uint64_t nr_block_infos;
@@ -298,7 +298,6 @@ extern struct json_object * show_thread_status(struct thread_stat *ts, struct gr
 extern void show_group_stats(struct group_run_stats *rs, struct buf_output *);
 extern bool calc_thread_status(struct jobs_eta *je, int force);
 extern void display_thread_status(struct jobs_eta *je);
-extern void show_run_stats(void);
 extern void __show_run_stats(void);
 extern void __show_running_run_stats(void);
 extern void show_running_run_stats(void);
@@ -319,12 +318,13 @@ extern void update_rusage_stat(struct thread_data *);
 extern void clear_rusage_stat(struct thread_data *);
 
 extern void add_lat_sample(struct thread_data *, enum fio_ddir, unsigned long long,
-				unsigned int, uint64_t);
+				unsigned long long, uint64_t);
 extern void add_clat_sample(struct thread_data *, enum fio_ddir, unsigned long long,
-				unsigned int, uint64_t);
+				unsigned long long, uint64_t);
 extern void add_slat_sample(struct thread_data *, enum fio_ddir, unsigned long,
-				unsigned int, uint64_t);
-extern void add_agg_sample(union io_sample_data, enum fio_ddir, unsigned int, unsigned int);
+				unsigned long long, uint64_t);
+extern void add_agg_sample(union io_sample_data, enum fio_ddir, unsigned long long bs,
+				unsigned int priorityBit);
 extern void add_iops_sample(struct thread_data *, struct io_u *,
 				unsigned int);
 extern void add_bw_sample(struct thread_data *, struct io_u *,

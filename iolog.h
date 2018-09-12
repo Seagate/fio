@@ -42,7 +42,7 @@ struct io_sample {
 	uint64_t time;
 	union io_sample_data data;
 	uint32_t __ddir;
-	uint32_t bs;
+	uint64_t bs;
 	unsigned int priorityBit;
 };
 
@@ -238,13 +238,14 @@ extern void log_file(struct thread_data *, struct fio_file *, enum file_log_act)
 extern bool __must_check init_iolog(struct thread_data *td);
 extern void log_io_piece(struct thread_data *, struct io_u *);
 extern void unlog_io_piece(struct thread_data *, struct io_u *);
-extern void trim_io_piece(struct thread_data *, const struct io_u *);
+extern void trim_io_piece(const struct io_u *);
 extern void queue_io_piece(struct thread_data *, struct io_piece *);
 extern void prune_io_piece_log(struct thread_data *);
 extern void write_iolog_close(struct thread_data *);
 extern int iolog_compress_init(struct thread_data *, struct sk_out *);
 extern void iolog_compress_exit(struct thread_data *);
 extern size_t log_chunk_sizes(struct io_log *);
+extern int init_io_u_buffers(struct thread_data *);
 
 #ifdef CONFIG_ZLIB
 extern int iolog_file_inflate(const char *);

@@ -163,12 +163,12 @@ Command line options
 
 .. option:: --readonly
 
-	Turn on safety read-only checks, preventing writes.  The ``--readonly``
-	option is an extra safety guard to prevent users from accidentally starting
-	a write workload when that is not desired.  Fio will only write if
-	`rw=write/randwrite/rw/randrw` is given.  This extra safety net can be used
-	as an extra precaution as ``--readonly`` will also enable a write check in
-	the I/O engine core to prevent writes due to unknown user space bug(s).
+	Turn on safety read-only checks, preventing writes and trims.  The
+	``--readonly`` option is an extra safety guard to prevent users from
+	accidentally starting a write or trim workload when that is not desired.
+	Fio will only modify the device under test if
+	`rw=write/randwrite/rw/randrw/trim/randtrim/trimwrite` is given.  This
+	safety net can be used as an extra precaution.
 
 .. option:: --eta=when
 
@@ -194,7 +194,10 @@ Command line options
 	Force a full status dump of cumulative (from job start) values at `time`
 	intervals. This option does *not* provide per-period measurements. So
 	values such as bandwidth are running averages. When the time unit is omitted,
-	`time` is interpreted in seconds.
+	`time` is interpreted in seconds. Note that using this option with
+	``--output-format=json`` will yield output that technically isn't valid
+	json, since the output will be collated sets of valid json. It will need
+	to be split into valid sets of json after the run.
 
 .. option:: --section=name
 
@@ -283,7 +286,8 @@ Command line options
 
 .. option:: --aux-path=path
 
-	Use this `path` for fio state generated files.
+	Use the directory specified by `path` for generated state files instead
+	of the current working directory.
 
 Any parameters following the options will be assumed to be job files, unless
 they match a job file parameter. Multiple job files can be listed and each job
@@ -748,11 +752,14 @@ Target file/device
 	assigned equally distributed to job clones created by :option:`numjobs` as
 	long as they are using generated filenames. If specific `filename(s)` are
 	set fio will use the first listed directory, and thereby matching the
-	`filename` semantic which generates a file each clone if not specified, but
-	let all clones use the same if set.
+	`filename` semantic (which generates a file for each clone if not
+	specified, but lets all clones use the same file if set).
 
 	See the :option:`filename` option for information on how to escape "``:``" and
 	"``\``" characters within the directory path itself.
+
+	Note: To control the directory fio will use for internal state files
+	use :option:`--aux-path`.
 
 .. option:: filename=str
 
@@ -948,18 +955,92 @@ Target file/device
 
 	Unlink job files after each iteration or loop.  Default: false.
 
-.. option:: zonesize=int
+.. option:: zonemode=str
 
-	Divide a file into zones of the specified size. See :option:`zoneskip`.
+	Accepted values are:
+
+		**none**
+				The :option:`zonerange`, :option:`zonesize` and
+				:option:`zoneskip` parameters are ignored.
+		**strided**
+				I/O happens in a single zone until
+				:option:`zonesize` bytes have been transferred.
+				After that number of bytes has been
+				transferred processing of the next zone
+				starts.
+		**zbd**
+				Zoned block device mode. I/O happens
+				sequentially in each zone, even if random I/O
+				has been selected. Random I/O happens across
+				all zones instead of being restricted to a
+				single zone. The :option:`zoneskip` parameter
+				is ignored. :option:`zonerange` and
+				:option:`zonesize` must be identical.
 
 .. option:: zonerange=int
 
-	Give size of an I/O zone.  See :option:`zoneskip`.
+	Size of a single zone. See also :option:`zonesize` and
+	:option:`zoneskip`.
+
+.. option:: zonesize=int
+
+	For :option:`zonemode` =strided, this is the number of bytes to
+	transfer before skipping :option:`zoneskip` bytes. If this parameter
+	is smaller than :option:`zonerange` then only a fraction of each zone
+	with :option:`zonerange` bytes will be accessed.  If this parameter is
+	larger than :option:`zonerange` then each zone will be accessed
+	multiple times before skipping to the next zone.
+
+	For :option:`zonemode` =zbd, this is the size of a single zone. The
+	:option:`zonerange` parameter is ignored in this mode.
 
 .. option:: zoneskip=int
 
-	Skip the specified number of bytes when :option:`zonesize` data has been
-	read. The two zone options can be used to only do I/O on zones of a file.
+	For :option:`zonemode` =strided, the number of bytes to skip after
+	:option:`zonesize` bytes of data have been transferred. This parameter
+	must be zero for :option:`zonemode` =zbd.
+
+.. option:: read_beyond_wp=bool
+
+	This parameter applies to :option:`zonemode` =zbd only.
+
+	Zoned block devices are block devices that consist of multiple zones.
+	Each zone has a type, e.g. conventional or sequential. A conventional
+	zone can be written at any offset that is a multiple of the block
+	size. Sequential zones must be written sequentially. The position at
+	which a write must occur is called the write pointer. A zoned block
+	device can be either drive managed, host managed or host aware. For
+	host managed devices the host must ensure that writes happen
+	sequentially. Fio recognizes host managed devices and serializes
+	writes to sequential zones for these devices.
+
+	If a read occurs in a sequential zone beyond the write pointer then
+	the zoned block device will complete the read without reading any data
+	from the storage medium. Since such reads lead to unrealistically high
+	bandwidth and IOPS numbers fio only reads beyond the write pointer if
+	explicitly told to do so. Default: false.
+
+.. option:: max_open_zones=int
+
+	When running a random write test across an entire drive many more
+	zones will be open than in a typical application workload. Hence this
+	command line option that allows to limit the number of open zones. The
+	number of open zones is defined as the number of zones to which write
+	commands are issued.
+
+.. option:: zone_reset_threshold=float
+
+	A number between zero and one that indicates the ratio of logical
+	blocks with data to the total number of logical blocks in the test
+	above which zones should be reset periodically.
+
+.. option:: zone_reset_frequency=float
+
+	A number between zero and one that indicates how often a zone reset
+	should be issued if the zone reset threshold has been exceeded. A zone
+	reset is submitted after each (1 / zone_reset_frequency) write
+	requests. This and the previous parameter can be used to simulate
+	garbage collection activity.
 
 
 I/O type
@@ -991,13 +1072,15 @@ I/O type
 		**write**
 				Sequential writes.
 		**trim**
-				Sequential trims (Linux block devices only).
+				Sequential trims (Linux block devices and SCSI
+				character devices only).
 		**randread**
 				Random reads.
 		**randwrite**
 				Random writes.
 		**randtrim**
-				Random trims (Linux block devices only).
+				Random trims (Linux block devices and SCSI
+				character devices only).
 		**rw,readwrite**
 				Sequential mixed reads and writes.
 		**randrw**
@@ -1329,7 +1412,9 @@ I/O type
 	and that some blocks may be read/written more than once. If this option is
 	used with :option:`verify` and multiple blocksizes (via :option:`bsrange`),
 	only intact blocks are verified, i.e., partially-overwritten blocks are
-	ignored.
+	ignored.  With an async I/O engine and an I/O depth > 1, it is possible for
+	the same block to be overwritten, which can cause verification errors.  Either
+	do not use norandommap in this case, or also use the lfsr random generator.
 
 .. option:: softrandommap=bool
 
@@ -1429,7 +1514,7 @@ Block size
 	If you want a workload that has 50% 2k reads and 50% 4k reads, while
 	having 90% 4k writes and 10% 8k writes, you would specify::
 
-		bssplit=2k/50:4k/50,4k/90,8k/10
+		bssplit=2k/50:4k/50,4k/90:8k/10
 
 	Fio supports defining up to 64 different weights for each data
 	direction.
@@ -1746,7 +1831,7 @@ I/O engine
 			ioctl, or if the target is an sg character device we use
 			:manpage:`read(2)` and :manpage:`write(2)` for asynchronous
 			I/O. Requires :option:`filename` option to specify either block or
-			character devices.
+			character devices. This engine supports trim operations.
 			The sg engine includes engine specific options.
 
 		**null**
@@ -1821,6 +1906,15 @@ I/O engine
 			(RBD) via librbd without the need to use the kernel rbd driver. This
 			ioengine defines engine specific options.
 
+		**http**
+			I/O engine supporting GET/PUT requests over HTTP(S) with libcurl to
+			a WebDAV or S3 endpoint.  This ioengine defines engine specific options.
+
+			This engine only supports direct IO of iodepth=1; you need to scale this
+			via numjobs. blocksize defines the size of the objects to be created.
+
+			TRIM is translated to object deletion.
+
 		**gfapi**
 			Using GlusterFS libgfapi sync interface to direct access to
 			GlusterFS volumes without having to go through FUSE.  This ioengine
@@ -1877,6 +1971,22 @@ I/O engine
 			Read and write using mmap I/O to a file on a filesystem
 			mounted with DAX on a persistent memory device through the PMDK
 			libpmem library.
+
+		**ime_psync**
+			Synchronous read and write using DDN's Infinite Memory Engine (IME).
+			This engine is very basic and issues calls to IME whenever an IO is
+			queued.
+
+		**ime_psyncv**
+			Synchronous read and write using DDN's Infinite Memory Engine (IME).
+			This engine uses iovecs and will try to stack as much IOs as possible
+			(if the IOs are "contiguous" and the IO depth is not exceeded)
+			before issuing a call to IME.
+
+		**ime_aio**
+			Asynchronous read and write using DDN's Infinite Memory Engine (IME).
+			This engine will try to stack as much IOs as possible by creating
+			requests for IME. FIO will then decide when to commit these requests.
 
 I/O engine specific parameters
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -2079,6 +2189,75 @@ with the caveat that when used on the command line, they must come after the
 	With writefua option set to 1, write operations include
 	the force unit access (fua) flag. Default is 0.
 
+.. option:: sg_write_mode=str : [sg]
+
+	Specify the type of write commands to issue. This option can take three values:
+
+	**write**
+		This is the default where write opcodes are issued as usual.
+	**verify**
+		Issue WRITE AND VERIFY commands. The BYTCHK bit is set to 0. This
+		directs the device to carry out a medium verification with no data
+		comparison. The writefua option is ignored with this selection.
+	**same**
+		Issue WRITE SAME commands. This transfers a single block to the device
+		and writes this same block of data to a contiguous sequence of LBAs
+		beginning at the specified offset. fio's block size parameter specifies
+		the amount of data written with each command. However, the amount of data
+		actually transferred to the device is equal to the device's block
+		(sector) size. For a device with 512 byte sectors, blocksize=8k will
+		write 16 sectors with each command. fio will still generate 8k of data
+		for each command but only the first 512 bytes will be used and
+		transferred to the device. The writefua option is ignored with this
+		selection.
+
+.. option:: http_host=str : [http]
+
+	Hostname to connect to. For S3, this could be the bucket hostname.
+	Default is **localhost**
+
+.. option:: http_user=str : [http]
+
+	Username for HTTP authentication.
+
+.. option:: http_pass=str : [http]
+
+	Password for HTTP authentication.
+
+.. option:: https=str : [http]
+
+	Enable HTTPS instead of http. *on* enables HTTPS; *insecure*
+	will enable HTTPS, but disable SSL peer verification (use with
+	caution!). Default is **off**
+
+.. option:: http_mode=str : [http]
+
+	Which HTTP access mode to use: *webdav*, *swift*, or *s3*.
+	Default is **webdav**
+
+.. option:: http_s3_region=str : [http]
+
+	The S3 region/zone string.
+	Default is **us-east-1**
+
+.. option:: http_s3_key=str : [http]
+
+	The S3 secret key.
+
+.. option:: http_s3_keyid=str : [http]
+
+	The S3 key/access id.
+
+.. option:: http_swift_auth_token=str : [http]
+
+	The Swift auth token. See the example configuration file on how
+	to retrieve this.
+
+.. option:: http_verbose=int : [http]
+
+	Enable verbose requests from libcurl. Useful for debugging. 1
+	turns on verbose logging from libcurl, 2 additionally enables
+	HTTP IO tracing. Default is **0**
 
 I/O depth
 ~~~~~~~~~
@@ -2301,6 +2480,16 @@ I/O replay
 	:manpage:`blktrace(8)` for how to capture such logging data. For blktrace
 	replay, the file needs to be turned into a blkparse binary data file first
 	(``blkparse <device> -o /dev/null -d file_for_fio.bin``).
+	You can specify a number of files by separating the names with a ':'
+	character. See the :option:`filename` option for information on how to
+	escape ':' and '\' characters within the file names. These files will
+	be sequentially assigned to job clones created by :option:`numjobs`.
+
+.. option:: read_iolog_chunked=bool
+
+	Determines how iolog is read. If false(default) entire :option:`read_iolog`
+	will be read at once. If selected true, input from iolog will be read
+	gradually. Useful when iolog is very large, or it is generated.
 
 .. option:: replay_no_stall=bool
 
@@ -2643,6 +2832,11 @@ Verification
 	previously written file. If the data direction includes any form of write,
 	the verify will be of the newly written data.
 
+	To avoid false verification errors, do not use the norandommap option when
+	verifying data with async I/O engines and I/O depths > 1.  Or use the
+	norandommap and the lfsr random generator together to avoid writing to the
+	same offset with muliple outstanding I/Os.
+
 .. option:: verify_offset=int
 
 	Swap the verification header with data somewhere else in the block before
@@ -2879,9 +3073,11 @@ Measurements and reporting
 .. option:: write_iops_log=str
 
 	Same as :option:`write_bw_log`, but writes an IOPS file (e.g.
-	:file:`name_iops.x.log`) instead. See :option:`write_bw_log` for
-	details about the filename format and `Log File Formats`_ for how data
-	is structured within the file.
+	:file:`name_iops.x.log`) instead. Because fio defaults to individual
+	I/O logging, the value entry in the IOPS log will be 1 unless windowed
+	logging (see :option:`log_avg_msec`) has been enabled. See
+	:option:`write_bw_log` for details about the filename format and `Log
+	File Formats`_ for how data is structured within the file.
 
 .. option:: log_avg_msec=int
 
@@ -3766,17 +3962,16 @@ on the type of log, it will be one of the following:
 	**2**
 		I/O is a TRIM
 
-The entry's *block size* is always in bytes. The *offset* is the offset, in bytes,
-from the start of the file, for that particular I/O. The logging of the offset can be
+The entry's *block size* is always in bytes. The *offset* is the position in bytes
+from the start of the file for that particular I/O. The logging of the offset can be
 toggled with :option:`log_offset`.
 
-Fio defaults to logging every individual I/O.  When IOPS are logged for individual
-I/Os the *value* entry will always be 1. If windowed logging is enabled through
-:option:`log_avg_msec`, fio logs the average values over the specified period of time.
-If windowed logging is enabled and :option:`log_max_value` is set, then fio logs
-maximum values in that window instead of averages. Since *data direction*, *block
-size* and *offset* are per-I/O values, if windowed logging is enabled they
-aren't applicable and will be 0.
+Fio defaults to logging every individual I/O but when windowed logging is set
+through :option:`log_avg_msec`, either the average (by default) or the maximum
+(:option:`log_max_value` is set) *value* seen over the specified period of time
+is recorded. Each *data direction* seen within the window period will aggregate
+its values in a separate row. Further, when using windowed logging the *block
+size* and *offset* entries will always contain 0.
 
 Client/Server
 -------------

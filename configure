@@ -14,12 +14,13 @@ else
 fi
 
 TMPC="${TMPDIR1}/fio-conf-${RANDOM}-$$-${RANDOM}.c"
+TMPC2="${TMPDIR1}/fio-conf-${RANDOM}-$$-${RANDOM}-2.c"
 TMPO="${TMPDIR1}/fio-conf-${RANDOM}-$$-${RANDOM}.o"
 TMPE="${TMPDIR1}/fio-conf-${RANDOM}-$$-${RANDOM}.exe"
 
 # NB: do not call "exit" in the trap handler; this is buggy with some shells;
 # see <1285349658-3122-1-git-send-email-loic.minier@linaro.org>
-trap "rm -f $TMPC $TMPO $TMPE" EXIT INT QUIT TERM
+trap "rm -f $TMPC $TMPC2 $TMPO $TMPE" EXIT INT QUIT TERM
 
 rm -rf config.log
 
@@ -181,6 +182,8 @@ for opt do
   ;;
   --disable-rbd) disable_rbd="yes"
   ;;
+  --disable-http) disable_http="yes"
+  ;;
   --disable-gfapi) disable_gfapi="yes"
   ;;
   --enable-libhdfs) libhdfs="yes"
@@ -198,6 +201,8 @@ for opt do
   --enable-cuda) enable_cuda="yes"
   ;;
   --disable-native) disable_native="yes"
+  ;;
+  --with-ime=*) ime_path="$optarg"
   ;;
   --help)
     show_help="yes"
@@ -221,6 +226,9 @@ if test "$show_help" = "yes" ; then
   echo "--enable-gfio           Enable building of gtk gfio"
   echo "--disable-numa          Disable libnuma even if found"
   echo "--disable-rdma          Disable RDMA support even if found"
+  echo "--disable-rados         Disable Rados support even if found"
+  echo "--disable-rbd           Disable Rados Block Device even if found"
+  echo "--disable-http          Disable HTTP support even if found"
   echo "--disable-gfapi         Disable gfapi"
   echo "--enable-libhdfs        Enable hdfs support"
   echo "--disable-lex           Disable use of lex/yacc for math"
@@ -230,6 +238,7 @@ if test "$show_help" = "yes" ; then
   echo "--disable-optimizations Don't enable compiler optimizations"
   echo "--enable-cuda           Enable GPUDirect RDMA support"
   echo "--disable-native        Don't build for native host"
+  echo "--with-ime=             Install path for DDN's Infinite Memory Engine"
   exit $exit_val
 fi
 
@@ -1140,28 +1149,6 @@ fi
 print_config "GUASI" "$guasi"
 
 ##########################################
-# fusion-aw probe
-if test "$fusion_aw" != "yes" ; then
-  fusion_aw="no"
-fi
-cat > $TMPC << EOF
-#include <nvm/nvm_primitives.h>
-int main(int argc, char **argv)
-{
-  nvm_version_t ver_info;
-  nvm_handle_t handle;
-
-  handle = nvm_get_handle(0, &ver_info);
-  return nvm_atomic_write(handle, 0, 0, 0);
-}
-EOF
-if compile_prog "" "-L/usr/lib/fio -L/usr/lib/nvm -lnvm-primitives -ldl -lpthread" "fusion-aw"; then
-  LIBS="-L/usr/lib/fio -L/usr/lib/nvm -lnvm-primitives -ldl -lpthread $LIBS"
-  fusion_aw="yes"
-fi
-print_config "Fusion-io atomic engine" "$fusion_aw"
-
-##########################################
 # libnuma probe
 if test "$libnuma" != "yes" ; then
   libnuma="no"
@@ -1567,6 +1554,61 @@ fi
 print_config "IPv6 helpers" "$ipv6"
 
 ##########################################
+# check for http
+if test "$http" != "yes" ; then
+  http="no"
+fi
+# check for openssl >= 1.1.0, which uses an opaque HMAC_CTX pointer
+cat > $TMPC << EOF
+#include <curl/curl.h>
+#include <openssl/hmac.h>
+
+int main(int argc, char **argv)
+{
+  CURL *curl;
+  HMAC_CTX *ctx;
+
+  curl = curl_easy_init();
+  curl_easy_cleanup(curl);
+
+  ctx = HMAC_CTX_new();
+  HMAC_CTX_reset(ctx);
+  HMAC_CTX_free(ctx);
+  return 0;
+}
+EOF
+# openssl < 1.1.0 uses the HMAC_CTX type directly
+cat > $TMPC2 << EOF
+#include <curl/curl.h>
+#include <openssl/hmac.h>
+
+int main(int argc, char **argv)
+{
+  CURL *curl;
+  HMAC_CTX ctx;
+
+  curl = curl_easy_init();
+  curl_easy_cleanup(curl);
+
+  HMAC_CTX_init(&ctx);
+  HMAC_CTX_cleanup(&ctx);
+  return 0;
+}
+EOF
+if test "$disable_http" != "yes"; then
+  HTTP_LIBS="-lcurl -lssl -lcrypto"
+  if compile_prog "" "$HTTP_LIBS" "curl-new-ssl"; then
+    output_sym "CONFIG_HAVE_OPAQUE_HMAC_CTX"
+    http="yes"
+    LIBS="$HTTP_LIBS $LIBS"
+  elif mv $TMPC2 $TMPC && compile_prog "" "$HTTP_LIBS" "curl-old-ssl"; then
+    http="yes"
+    LIBS="$HTTP_LIBS $LIBS"
+  fi
+fi
+print_config "http engine" "$http"
+
+##########################################
 # check for rados
 if test "$rados" != "yes" ; then
   rados="no"
@@ -1903,6 +1945,29 @@ print_config "PMDK dev-dax engine" "$devdax"
 ##########################################
 # Report whether libpmem engine is enabled
 print_config "PMDK libpmem engine" "$pmem"
+
+##########################################
+# Check whether we support DDN's IME
+if test "$libime" != "yes" ; then
+  libime="no"
+fi
+cat > $TMPC << EOF
+#include <ime_native.h>
+int main(int argc, char **argv)
+{
+  int rc;
+  ime_native_init();
+  rc = ime_native_finalize();
+  return 0;
+}
+EOF
+if compile_prog "-I${ime_path}/include" "-L${ime_path}/lib -lim_client" "libime"; then
+  libime="yes"
+  CFLAGS="-I${ime_path}/include $CFLAGS"
+  LDFLAGS="-Wl,-rpath ${ime_path}/lib -L${ime_path}/lib $LDFLAGS"
+  LIBS="-lim_client $LIBS"
+fi
+print_config "DDN's Infinite Memory Engine" "$libime"
 
 ##########################################
 # Check if we have lex/yacc available
@@ -2318,9 +2383,6 @@ fi
 if test "$guasi" = "yes" ; then
   output_sym "CONFIG_GUASI"
 fi
-if test "$fusion_aw" = "yes" ; then
-  output_sym "CONFIG_FUSION_AW"
-fi
 if test "$libnuma_v2" = "yes" ; then
   output_sym "CONFIG_LIBNUMA"
 fi
@@ -2363,6 +2425,9 @@ if test "$pwritev2" = "yes" ; then
 fi
 if test "$ipv6" = "yes" ; then
   output_sym "CONFIG_IPV6"
+fi
+if test "$http" = "yes" ; then
+  output_sym "CONFIG_HTTP"
 fi
 if test "$rados" = "yes" ; then
   output_sym "CONFIG_RADOS"
@@ -2411,6 +2476,9 @@ if test "$devdax" = "yes" ; then
 fi
 if test "$pmem" = "yes" ; then
   output_sym "CONFIG_LIBPMEM"
+fi
+if test "$libime" = "yes" ; then
+  output_sym "CONFIG_IME"
 fi
 if test "$arith" = "yes" ; then
   output_sym "CONFIG_ARITHMETIC"

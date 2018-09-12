@@ -68,12 +68,11 @@ available ioengines.
 Convert \fIjobfile\fR to a set of command\-line options.
 .TP
 .BI \-\-readonly
-Turn on safety read\-only checks, preventing writes. The \fB\-\-readonly\fR
+Turn on safety read\-only checks, preventing writes and trims. The \fB\-\-readonly\fR
 option is an extra safety guard to prevent users from accidentally starting
-a write workload when that is not desired. Fio will only write if
-`rw=write/randwrite/rw/randrw' is given. This extra safety net can be used
-as an extra precaution as \fB\-\-readonly\fR will also enable a write check in
-the I/O engine core to prevent writes due to unknown user space bug(s).
+a write or trim workload when that is not desired. Fio will only modify the
+device under test if `rw=write/randwrite/rw/randrw/trim/randtrim/trimwrite'
+is given. This safety net can be used as an extra precaution.
 .TP
 .BI \-\-eta \fR=\fPwhen
 Specifies when real\-time ETA estimate should be printed. \fIwhen\fR may
@@ -94,7 +93,10 @@ the value is interpreted in seconds.
 Force a full status dump of cumulative (from job start) values at \fItime\fR
 intervals. This option does *not* provide per-period measurements. So
 values such as bandwidth are running averages. When the time unit is omitted,
-\fItime\fR is interpreted in seconds.
+\fItime\fR is interpreted in seconds. Note that using this option with
+`\-\-output-format=json' will yield output that technically isn't valid json,
+since the output will be collated sets of valid json. It will need to be split
+into valid sets of json after the run.
 .TP
 .BI \-\-section \fR=\fPname
 Only run specified section \fIname\fR in job file. Multiple sections can be specified.
@@ -169,7 +171,8 @@ Set this \fIcommand\fR as local trigger.
 Set this \fIcommand\fR as remote trigger.
 .TP
 .BI \-\-aux\-path \fR=\fPpath
-Use this \fIpath\fR for fio state generated files.
+Use the directory specified by \fIpath\fP for generated state files instead
+of the current working directory.
 .SH "JOB FILE FORMAT"
 Any parameters following the options will be assumed to be job files, unless
 they match a job file parameter. Multiple job files can be listed and each job
@@ -524,12 +527,15 @@ separating the names with a ':' character. These directories will be
 assigned equally distributed to job clones created by \fBnumjobs\fR as
 long as they are using generated filenames. If specific \fBfilename\fR(s) are
 set fio will use the first listed directory, and thereby matching the
-\fBfilename\fR semantic which generates a file each clone if not specified, but
-let all clones use the same if set.
+\fBfilename\fR semantic (which generates a file for each clone if not
+specified, but lets all clones use the same file if set).
 .RS
 .P
-See the \fBfilename\fR option for information on how to escape ':' and '\'
+See the \fBfilename\fR option for information on how to escape ':' and '\\'
 characters within the directory path itself.
+.P
+Note: To control the directory fio will use for internal state files
+use \fB\-\-aux\-path\fR.
 .RE
 .TP
 .BI filename \fR=\fPstr
@@ -546,13 +552,13 @@ by this option will be \fBsize\fR divided by number of files unless an
 explicit size is specified by \fBfilesize\fR.
 .RS
 .P
-Each colon and backslash in the wanted path must be escaped with a '\'
+Each colon and backslash in the wanted path must be escaped with a '\\'
 character. For instance, if the path is `/dev/dsk/foo@3,0:c' then you
 would use `filename=/dev/dsk/foo@3,0\\:c' and if the path is
-`F:\\\\filename' then you would use `filename=F\\:\\\\filename'.
+`F:\\filename' then you would use `filename=F\\:\\\\filename'.
 .P
-On Windows, disk devices are accessed as `\\\\\\\\.\\\\PhysicalDrive0' for
-the first device, `\\\\\\\\.\\\\PhysicalDrive1' for the second etc.
+On Windows, disk devices are accessed as `\\\\.\\PhysicalDrive0' for
+the first device, `\\\\.\\PhysicalDrive1' for the second etc.
 Note: Windows and FreeBSD prevent write access to areas
 of the disk containing in\-use data (e.g. filesystems).
 .P
@@ -721,17 +727,48 @@ false.
 .BI unlink_each_loop \fR=\fPbool
 Unlink job files after each iteration or loop. Default: false.
 .TP
-.BI zonesize \fR=\fPint
-Divide a file into zones of the specified size. See \fBzoneskip\fR.
+.BI zonemode \fR=\fPstr
+Accepted values are:
+.RS
+.RS
+.TP
+.B none
+The \fBzonerange\fR, \fBzonesize\fR and \fBzoneskip\fR parameters are ignored.
+.TP
+.B strided
+I/O happens in a single zone until \fBzonesize\fR bytes have been transferred.
+After that number of bytes has been transferred processing of the next zone
+starts.
+.TP
+.B zbd
+Zoned block device mode. I/O happens sequentially in each zone, even if random
+I/O has been selected. Random I/O happens across all zones instead of being
+restricted to a single zone.
+.RE
+.RE
 .TP
 .BI zonerange \fR=\fPint
-Give size of an I/O zone. See \fBzoneskip\fR.
+Size of a single zone. See also \fBzonesize\fR and \fBzoneskip\fR.
+.TP
+.BI zonesize \fR=\fPint
+For \fBzonemode\fR=strided, this is the number of bytes to transfer before
+skipping \fBzoneskip\fR bytes. If this parameter is smaller than
+\fBzonerange\fR then only a fraction of each zone with \fBzonerange\fR bytes
+will be accessed.  If this parameter is larger than \fBzonerange\fR then each
+zone will be accessed multiple times before skipping to the next zone.
+
+For \fBzonemode\fR=zbd, this is the size of a single zone. The \fBzonerange\fR
+parameter is ignored in this mode.
 .TP
 .BI zoneskip \fR=\fPint
-Skip the specified number of bytes when \fBzonesize\fR data has been
-read. The two zone options can be used to only do I/O on zones of a file.
+For \fBzonemode\fR=strided, the number of bytes to skip after \fBzonesize\fR
+bytes of data have been transferred. This parameter must be zero for
+\fBzonemode\fR=zbd.
 
-.SS "Zoned Block Devices"
+.TP
+.BI read_beyond_wp \fR=\fPbool
+This parameter applies to \fBzonemode=zbd\fR only.
+
 Zoned block devices are block devices that consist of multiple zones. Each
 zone has a type, e.g. conventional or sequential. A conventional zone can be
 written at any offset that is a multiple of the block size. Sequential zones
@@ -739,10 +776,8 @@ must be written sequentially. The position at which a write must occur is
 called the write pointer. A zoned block device can be either drive
 managed, host managed or host aware. For host managed devices the host must
 ensure that writes happen sequentially. Fio recognizes host managed devices
-and serializes writes to sequential zones for these devices. The options that
-fio supports for zoned block devices are as follows:
-.TP
-.BI read_beyond_wp \fR=\fPbool
+and serializes writes to sequential zones for these devices.
+
 If a read occurs in a sequential zone beyond the write pointer then the zoned
 block device will complete the read without reading any data from the storage
 medium. Since such reads lead to unrealistically high bandwidth and IOPS
@@ -752,16 +787,19 @@ so. Default: false.
 .BI max_open_zones \fR=\fPint
 When running a random write test across an entire drive many more zones will be
 open than in a typical application workload. Hence this command line option
-that allows to limit the number of open zones.
+that allows to limit the number of open zones. The number of open zones is
+defined as the number of zones to which write commands are issued.
 .TP
 .BI zone_reset_threshold \fR=\fPfloat
 A number between zero and one that indicates the ratio of logical blocks with
 data to the total number of logical blocks in the test above which zones
 should be reset periodically.
+.TP
 .BI zone_reset_frequency \fR=\fPfloat
 A number between zero and one that indicates how often a zone reset should be
-issued if the zone reset threshold has been exceeded. This and the previous
-parameter can be used to simulate garbage collection activity.
+issued if the zone reset threshold has been exceeded. A zone reset is
+submitted after each (1 / zone_reset_frequency) write requests. This and the
+previous parameter can be used to simulate garbage collection activity.
 
 .SS "I/O type"
 .TP
@@ -791,7 +829,7 @@ Sequential reads.
 Sequential writes.
 .TP
 .B trim
-Sequential trims (Linux block devices only).
+Sequential trims (Linux block devices and SCSI character devices only).
 .TP
 .B randread
 Random reads.
@@ -800,7 +838,7 @@ Random reads.
 Random writes.
 .TP
 .B randtrim
-Random trims (Linux block devices only).
+Random trims (Linux block devices and SCSI character devices only).
 .TP
 .B rw,readwrite
 Sequential mixed reads and writes.
@@ -1154,7 +1192,9 @@ at past I/O history. This means that some blocks may not be read or written,
 and that some blocks may be read/written more than once. If this option is
 used with \fBverify\fR and multiple blocksizes (via \fBbsrange\fR),
 only intact blocks are verified, i.e., partially\-overwritten blocks are
-ignored.
+ignored.  With an async I/O engine and an I/O depth > 1, it is possible for
+the same block to be overwritten, which can cause verification errors.  Either
+do not use norandommap in this case, or also use the lfsr random generator.
 .TP
 .BI softrandommap \fR=\fPbool
 See \fBnorandommap\fR. If fio runs with the random block map enabled and
@@ -1260,7 +1300,7 @@ If you want a workload that has 50% 2k reads and 50% 4k reads, while having
 90% 4k writes and 10% 8k writes, you would specify:
 .RS
 .P
-bssplit=2k/50:4k/50,4k/90,8k/10
+bssplit=2k/50:4k/50,4k/90:8k/10
 .RE
 .P
 Fio supports defining up to 64 different weights for each data direction.
@@ -1556,7 +1596,8 @@ SCSI generic sg v3 I/O. May either be synchronous using the SG_IO
 ioctl, or if the target is an sg character device we use
 \fBread\fR\|(2) and \fBwrite\fR\|(2) for asynchronous
 I/O. Requires \fBfilename\fR option to specify either block or
-character devices. The sg engine includes engine specific options.
+character devices. This engine supports trim operations. The
+sg engine includes engine specific options.
 .TP
 .B null
 Doesn't transfer any data, just pretends to. This is mainly used to
@@ -1628,6 +1669,15 @@ I/O engine supporting direct access to Ceph Rados Block Devices
 (RBD) via librbd without the need to use the kernel rbd driver. This
 ioengine defines engine specific options.
 .TP
+.B http
+I/O engine supporting GET/PUT requests over HTTP(S) with libcurl to
+a WebDAV or S3 endpoint.  This ioengine defines engine specific options.
+
+This engine only supports direct IO of iodepth=1; you need to scale this
+via numjobs. blocksize defines the size of the objects to be created.
+
+TRIM is translated to object deletion.
+.TP
 .B gfapi
 Using GlusterFS libgfapi sync interface to direct access to
 GlusterFS volumes without having to go through FUSE. This ioengine
@@ -1684,6 +1734,20 @@ done other than creating the file.
 Read and write using mmap I/O to a file on a filesystem
 mounted with DAX on a persistent memory device through the PMDK
 libpmem library.
+.TP
+.B ime_psync
+Synchronous read and write using DDN's Infinite Memory Engine (IME). This
+engine is very basic and issues calls to IME whenever an IO is queued.
+.TP
+.B ime_psyncv
+Synchronous read and write using DDN's Infinite Memory Engine (IME). This
+engine uses iovecs and will try to stack as much IOs as possible (if the IOs
+are "contiguous" and the IO depth is not exceeded) before issuing a call to IME.
+.TP
+.B ime_aio
+Asynchronous read and write using DDN's Infinite Memory Engine (IME). This
+engine will try to stack as much IOs as possible by creating requests for IME.
+FIO will then decide when to commit these requests.
 .SS "I/O engine specific parameters"
 In addition, there are some parameters which are only valid when a specific
 \fBioengine\fR is in use. These are used identically to normal parameters,
@@ -1830,6 +1894,43 @@ by default.
 Poll store instead of waiting for completion. Usually this provides better
 throughput at cost of higher(up to 100%) CPU utilization.
 .TP
+.BI (http)http_host \fR=\fPstr
+Hostname to connect to. For S3, this could be the bucket name. Default
+is \fBlocalhost\fR
+.TP
+.BI (http)http_user \fR=\fPstr
+Username for HTTP authentication.
+.TP
+.BI (http)http_pass \fR=\fPstr
+Password for HTTP authentication.
+.TP
+.BI (http)https \fR=\fPstr
+Whether to use HTTPS instead of plain HTTP. \fRon\fP enables HTTPS;
+\fRinsecure\fP will enable HTTPS, but disable SSL peer verification (use
+with caution!).  Default is \fBoff\fR.
+.TP
+.BI (http)http_mode \fR=\fPstr
+Which HTTP access mode to use: webdav, swift, or s3. Default is
+\fBwebdav\fR.
+.TP
+.BI (http)http_s3_region \fR=\fPstr
+The S3 region/zone to include in the request. Default is \fBus-east-1\fR.
+.TP
+.BI (http)http_s3_key \fR=\fPstr
+The S3 secret key.
+.TP
+.BI (http)http_s3_keyid \fR=\fPstr
+The S3 key/access id.
+.TP
+.BI (http)http_swift_auth_token \fR=\fPstr
+The Swift auth token. See the example configuration file on how to
+retrieve this.
+.TP
+.BI (http)http_verbose \fR=\fPint
+Enable verbose requests from libcurl. Useful for debugging. 1 turns on
+verbose logging from libcurl, 2 additionally enables HTTP IO tracing.
+Default is \fB0\fR
+.TP
 .BI (mtd)skip_bad \fR=\fPbool
 Skip operations against known bad blocks.
 .TP
@@ -1861,6 +1962,33 @@ unit access (fua) flag. Default: 0.
 .BI (sg)writefua \fR=\fPbool
 With writefua option set to 1, write operations include the force
 unit access (fua) flag. Default: 0.
+.TP
+.BI (sg)sg_write_mode \fR=\fPstr
+Specify the type of write commands to issue. This option can take three
+values:
+.RS
+.RS
+.TP
+.B write (default)
+Write opcodes are issued as usual
+.TP
+.B verify
+Issue WRITE AND VERIFY commands. The BYTCHK bit is set to 0. This
+directs the device to carry out a medium verification with no data
+comparison. The writefua option is ignored with this selection.
+.TP
+.B same
+Issue WRITE SAME commands. This transfers a single block to the device
+and writes this same block of data to a contiguous sequence of LBAs
+beginning at the specified offset. fio's block size parameter
+specifies the amount of data written with each command. However, the
+amount of data actually transferred to the device is equal to the
+device's block (sector) size. For a device with 512 byte sectors,
+blocksize=8k will write 16 sectors with each command. fio will still
+generate 8k of data for each command butonly the first 512 bytes will
+be used and transferred to the device. The writefua option is ignored
+with this selection.
+
 .SS "I/O depth"
 .TP
 .BI iodepth \fR=\fPint
@@ -2060,6 +2188,15 @@ to replay a workload captured by blktrace. See
 \fBblktrace\fR\|(8) for how to capture such logging data. For blktrace
 replay, the file needs to be turned into a blkparse binary data file first
 (`blkparse <device> \-o /dev/null \-d file_for_fio.bin').
+You can specify a number of files by separating the names with a ':' character.
+See the \fBfilename\fR option for information on how to escape ':' and '\'
+characters within the file names. These files will be sequentially assigned to
+job clones created by \fBnumjobs\fR.
+.TP
+.BI read_iolog_chunked \fR=\fPbool
+Determines how iolog is read. If false (default) entire \fBread_iolog\fR will
+be read at once. If selected true, input from iolog will be read gradually.
+Useful when iolog is very large, or it is generated.
 .TP
 .BI replay_no_stall \fR=\fPbool
 When replaying I/O with \fBread_iolog\fR the default behavior is to
@@ -2377,6 +2514,11 @@ that the written data is also correctly read back. If the data direction
 given is a read or random read, fio will assume that it should verify a
 previously written file. If the data direction includes any form of write,
 the verify will be of the newly written data.
+.P
+To avoid false verification errors, do not use the norandommap option when
+verifying data with async I/O engines and I/O depths > 1.  Or use the
+norandommap and the lfsr random generator together to avoid writing to the
+same offset with muliple outstanding I/Os.
 .RE
 .TP
 .BI verify_offset \fR=\fPint
@@ -2602,9 +2744,11 @@ within the file.
 .TP
 .BI write_iops_log \fR=\fPstr
 Same as \fBwrite_bw_log\fR, but writes an IOPS file (e.g.
-`name_iops.x.log') instead. See \fBwrite_bw_log\fR for
-details about the filename format and the \fBLOG FILE FORMATS\fR section for how data
-is structured within the file.
+`name_iops.x.log`) instead. Because fio defaults to individual
+I/O logging, the value entry in the IOPS log will be 1 unless windowed
+logging (see \fBlog_avg_msec\fR) has been enabled. See
+\fBwrite_bw_log\fR for details about the filename format and \fBLOG
+FILE FORMATS\fR for how data is structured within the file.
 .TP
 .BI log_avg_msec \fR=\fPint
 By default, fio will log an entry in the iops, latency, or bw log for every
@@ -3521,17 +3665,16 @@ I/O is a WRITE
 I/O is a TRIM
 .RE
 .P
-The entry's `block size' is always in bytes. The `offset' is the offset, in bytes,
-from the start of the file, for that particular I/O. The logging of the offset can be
+The entry's `block size' is always in bytes. The `offset' is the position in bytes
+from the start of the file for that particular I/O. The logging of the offset can be
 toggled with \fBlog_offset\fR.
 .P
-Fio defaults to logging every individual I/O. When IOPS are logged for individual
-I/Os the `value' entry will always be 1. If windowed logging is enabled through
-\fBlog_avg_msec\fR, fio logs the average values over the specified period of time.
-If windowed logging is enabled and \fBlog_max_value\fR is set, then fio logs
-maximum values in that window instead of averages. Since `data direction', `block size'
-and `offset' are per\-I/O values, if windowed logging is enabled they
-aren't applicable and will be 0.
+Fio defaults to logging every individual I/O but when windowed logging is set
+through \fBlog_avg_msec\fR, either the average (by default) or the maximum
+(\fBlog_max_value\fR is set) `value' seen over the specified period of time
+is recorded. Each `data direction' seen within the window period will aggregate
+its values in a separate row. Further, when using windowed logging the `block
+size' and `offset' entries will always contain 0.
 .SH CLIENT / SERVER
 Normally fio is invoked as a stand\-alone application on the machine where the
 I/O workload should be generated. However, the backend and frontend of fio can

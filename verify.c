@@ -801,7 +801,7 @@ static int verify_trimmed_io_u(struct thread_data *td, struct io_u *io_u)
 
 	mem_is_zero_slow(io_u->buf, io_u->buflen, &offset);
 
-	log_err("trim: verify failed at file %s offset %llu, length %lu"
+	log_err("trim: verify failed at file %s offset %llu, length %llu"
 		", block offset %lu\n",
 			io_u->file->file_name, io_u->offset, io_u->buflen,
 			(unsigned long) offset);
@@ -1517,7 +1517,7 @@ int paste_blockoff(char *buf, unsigned int len, void *priv)
 	struct io_u *io = priv;
 	unsigned long long off;
 
-	typecheck(typeof(off), io->offset);
+	typecheck(__typeof__(off), io->offset);
 	off = cpu_to_le64((uint64_t)io->offset);
 	len = min(len, (unsigned int)sizeof(off));
 	memcpy(buf, &off, len);

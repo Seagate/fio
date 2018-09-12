@@ -89,7 +89,7 @@ struct fio_file {
 	 */
 	unsigned int major, minor;
 	int fileno;
-	int bs;
+	unsigned long long bs;
 	char *file_name;
 
 	/*
@@ -101,7 +101,7 @@ struct fio_file {
 	uint64_t io_size;
 
 	/*
-	 * Zoned device information
+	 * Zoned block device information. See also zonemode=zbd.
 	 */
 	struct zoned_block_device_info *zbd_info;
 

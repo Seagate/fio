@@ -18,6 +18,7 @@
 
 #include "fio.h"
 #include "diskutil.h"
+#include "zbd.h"
 
 static FLIST_HEAD(engine_list);
 
@@ -279,7 +280,7 @@ out:
 enum fio_q_status td_io_queue(struct thread_data *td, struct io_u *io_u)
 {
 	const enum fio_ddir ddir = acct_ddir(io_u);
-	unsigned long buflen = io_u->xfer_buflen;
+	unsigned long long buflen = io_u->xfer_buflen;
 	enum fio_q_status ret;
 
 	dprint_io_u(io_u, "queue");
@@ -319,8 +320,8 @@ enum fio_q_status td_io_queue(struct thread_data *td, struct io_u *io_u)
 	}
 
 	ret = td->io_ops->queue(td, io_u);
-	if (io_u->post_submit) {
-		io_u->post_submit(io_u, ret);
+	if (ret != FIO_Q_BUSY && io_u->post_submit) {
+		io_u->post_submit(io_u, io_u->error == 0);
 		io_u->post_submit = NULL;
 	}
 
@@ -354,7 +355,14 @@ enum fio_q_status td_io_queue(struct thread_data *td, struct io_u *io_u)
 			 "invalid block size. Try setting direct=0.\n");
 	}
 
-	if (!td->io_ops->commit || io_u->ddir == DDIR_TRIM) {
+	if (zbd_unaligned_write(io_u->error) &&
+	    td->io_issues[io_u->ddir & 1] == 1 &&
+	    td->o.zone_mode != ZONE_MODE_ZBD) {
+		log_info("fio: first I/O failed. If %s is a zoned block device, consider --zonemode=zbd\n",
+			 io_u->file->file_name);
+	}
+
+	if (!td->io_ops->commit) {
 		io_u_mark_submit(td, 1);
 		io_u_mark_complete(td, 1);
 	}
@@ -435,6 +443,14 @@ void td_io_commit(struct thread_data *td)
 
 int td_io_open_file(struct thread_data *td, struct fio_file *f)
 {
+	if (fio_file_closing(f)) {
+		/*
+		 * Open translates to undo closing.
+		 */
+		fio_file_clear_closing(f);
+		get_file(f);
+		return 0;
+	}
 	assert(!fio_file_open(f));
 	assert(f->fd == -1);
 	assert(td->io_ops->open_file);
@@ -544,11 +560,6 @@ int td_io_close_file(struct thread_data *td, struct fio_file *f)
 	 */
 	fio_file_set_closing(f);
 
-	disk_util_dec(f->du);
-
-	if (td->o.file_lock_mode != FILE_LOCK_NONE)
-		unlock_file_all(td, f);
-
 	return put_file(td, f);
 }
 
@@ -578,6 +589,7 @@ int td_io_get_file_size(struct thread_data *td, struct fio_file *f)
 int fio_show_ioengine_help(const char *engine)
 {
 	struct flist_head *entry;
+	struct thread_data td;
 	struct ioengine_ops *io_ops;
 	char *sep;
 	int ret = 1;
@@ -596,7 +608,10 @@ int fio_show_ioengine_help(const char *engine)
 		sep++;
 	}
 
-	io_ops = __load_ioengine(engine);
+	memset(&td, 0, sizeof(struct thread_data));
+	td.o.ioengine = (char *)engine;
+	io_ops = load_ioengine(&td);
+
 	if (!io_ops) {
 		log_info("IO engine %s not found\n", engine);
 		return 1;
@@ -607,5 +622,6 @@ int fio_show_ioengine_help(const char *engine)
 	else
 		log_info("IO engine %s has no options\n", io_ops->name);
 
+	free_ioengine(&td);
 	return ret;
 }

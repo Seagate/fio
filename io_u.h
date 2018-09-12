@@ -54,7 +54,7 @@ struct io_u {
 	/*
 	 * Allocated/set buffer and length
 	 */
-	unsigned long buflen;
+	unsigned long long buflen;
 	unsigned long long offset;
 	void *buf;
 
@@ -68,17 +68,17 @@ struct io_u {
 	 * partial transfers / residual data counts
 	 */
 	void *xfer_buf;
-	unsigned long xfer_buflen;
+	unsigned long long xfer_buflen;
 
 	/*
 	 * Parameter related to pre-filled buffers and
 	 * their size to handle variable block sizes.
 	 */
-	unsigned long buf_filled_len;
+	unsigned long long buf_filled_len;
 
 	struct io_piece *ipo;
 
-	unsigned int resid;
+	unsigned long long resid;
 	unsigned int error;
 
 	/*
@@ -96,10 +96,10 @@ struct io_u {
 	};
 
 	/*
-	 * Post-submit callback. Used by the ZBC code.
+	 * Post-submit callback. Used by the ZBD code. @success == true means
+	 * that the I/O operation has been queued or completed successfully.
 	 */
-	void (*post_submit)(const struct io_u *,
-			    enum fio_q_status submit_result);
+	void (*post_submit)(const struct io_u *, bool success);
 
 	/*
 	 * Callback for io completion
@@ -143,8 +143,8 @@ extern void io_u_queued(struct thread_data *, struct io_u *);
 extern int io_u_quiesce(struct thread_data *);
 extern void io_u_log_error(struct thread_data *, struct io_u *);
 extern void io_u_mark_depth(struct thread_data *, unsigned int);
-extern void fill_io_buffer(struct thread_data *, void *, unsigned int, unsigned int);
-extern void io_u_fill_buffer(struct thread_data *td, struct io_u *, unsigned int, unsigned int);
+extern void fill_io_buffer(struct thread_data *, void *, unsigned long long, unsigned long long);
+extern void io_u_fill_buffer(struct thread_data *td, struct io_u *, unsigned long long, unsigned long long);
 void io_u_mark_complete(struct thread_data *, unsigned int);
 void io_u_mark_submit(struct thread_data *, unsigned int);
 bool queue_full(const struct thread_data *);
@@ -158,13 +158,13 @@ static inline void dprint_io_u(struct io_u *io_u, const char *p)
 	struct fio_file *f = io_u->file;
 
 	if (f)
-		dprint(FD_IO, "%s: io_u %p: off=0x%llx,len=0x%lx,ddir=%d,file=%s\n",
+		dprint(FD_IO, "%s: io_u %p: off=0x%llx,len=0x%llx,ddir=%d,file=%s\n",
 				p, io_u,
 				(unsigned long long) io_u->offset,
 				io_u->buflen, io_u->ddir,
 				f->file_name);
 	else
-		dprint(FD_IO, "%s: io_u %p: off=0x%llx,len=0x%lx,ddir=%d\n",
+		dprint(FD_IO, "%s: io_u %p: off=0x%llx,len=0x%llx,ddir=%d\n",
 				p, io_u,
 				(unsigned long long) io_u->offset,
 				io_u->buflen, io_u->ddir);
