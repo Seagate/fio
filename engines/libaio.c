@@ -39,7 +39,6 @@ struct libaio_data {
 struct libaio_options {
 	void *pad;
 	unsigned int userspace_reap;
-    unsigned int prio_percent;
 };
 
 static struct fio_option options[] = {
@@ -49,17 +48,6 @@ static struct fio_option options[] = {
 		.type	= FIO_OPT_STR_SET,
 		.off1	= offsetof(struct libaio_options, userspace_reap),
 		.help	= "Use alternative user-space reap implementation",
-		.category = FIO_OPT_C_ENGINE,
-		.group	= FIO_OPT_G_LIBAIO,
-	},
-	{
-		.name	= "prio_percent",
-		.lname	= "prio percentage",
-		.type	= FIO_OPT_INT,
-		.off1	= offsetof(struct libaio_options, prio_percent),
-		.minval	= 1,
-		.maxval	= 100,
-		.help	= "Split the prioclass setting for IO",
 		.category = FIO_OPT_C_ENGINE,
 		.group	= FIO_OPT_G_LIBAIO,
 	},
@@ -255,8 +243,6 @@ static int fio_libaio_commit(struct thread_data *td)
 	struct libaio_data *ld = td->io_ops_data;
 	struct iocb **iocbs;
 	struct io_u **io_us;
-    struct thread_options *o = &td->o;
-	struct libaio_options *eo = td->eo;
 	struct timespec ts;
 	int ret, wait_start = 0;
 
@@ -269,35 +255,6 @@ static int fio_libaio_commit(struct thread_data *td)
 		nr = min((unsigned int) nr, ld->entries - ld->tail);
 		io_us = ld->io_us + ld->tail;
 		iocbs = ld->iocbs + ld->tail;
-
-
-        if (fio_option_is_set(o, ioprio) ||
-            fio_option_is_set(o, ioprio_class)) {
-
-            if ( io_us[0]->ddir == DDIR_READ) { //What if there is more than one request?
-                if (eo->prio_percent) {
-                    if ((rand()%100 >= eo->prio_percent) == 0) {
-                        dprint(FD_IO, "Enable PRIO \n");
-                        ioprio_set(IOPRIO_WHO_PROCESS, 0, o->ioprio_class, o->ioprio);
-                        io_us[0]->priorityBit = 1;
-
-
-                    } else {
-                        dprint(FD_IO, "Disable PRIO \n");
-                        ioprio_set(IOPRIO_WHO_PROCESS, 0, 0, 0);
-                        io_us[0]->priorityBit = 0;
-                    }
-                }
-            } else {
-                // This is here so if previous READ turned this off.
-                // This will make sure the behavior is consistant.
-                ioprio_set(IOPRIO_WHO_PROCESS, 0, o->ioprio_class, o->ioprio);
-                io_us[0]->priorityBit = 1;
-            }
-
-        }
-
-
 
         dprint(FD_IO, "Submitted %ld IO request blocks\n", nr);
 

@@ -282,6 +282,7 @@ enum fio_q_status td_io_queue(struct thread_data *td, struct io_u *io_u)
 	const enum fio_ddir ddir = acct_ddir(io_u);
 	unsigned long long buflen = io_u->xfer_buflen;
 	enum fio_q_status ret;
+	struct thread_options* o = &td->o;
 
 	dprint_io_u(io_u, "queue");
 	fio_ro_check(td, io_u);
@@ -310,6 +311,33 @@ enum fio_q_status td_io_queue(struct thread_data *td, struct io_u *io_u)
 			memcpy(&td->last_issue, &io_u->issue_time,
 					sizeof(io_u->issue_time));
 	}
+
+	if (fio_option_is_set(o, ioprio) ||
+	    fio_option_is_set(o, ioprio_class)) {
+
+	    if ( io_u->ddir == DDIR_READ) { //What if there is more than one request?
+	        if (o->prio_percent) {
+	            if ((rand()%100 >= o->prio_percent) == 0) {
+	                dprint(FD_IO, "Enable PRIO \n");
+	                ioprio_set(IOPRIO_WHO_PROCESS, 0, o->ioprio_class, o->ioprio);
+	                io_u->priorityBit = 1;
+
+
+	            } else {
+	                dprint(FD_IO, "Disable PRIO \n");
+	                ioprio_set(IOPRIO_WHO_PROCESS, 0, 0, 0);
+	                io_u->priorityBit = 0;
+	            }
+	        }
+	    } else {
+	        // This is here so if previous READ turned this off.
+	        // This will make sure the behavior is consistant.
+	        ioprio_set(IOPRIO_WHO_PROCESS, 0, o->ioprio_class, o->ioprio);
+	        io_u->priorityBit = 1;
+	    }
+
+	}
+
 
 	if (ddir_rw(ddir)) {
 		if (!(io_u->flags & IO_U_F_VER_LIST)) {
