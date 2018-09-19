@@ -239,10 +239,10 @@ struct thread_stat {
 	fio_fp64_t ss_criterion;
 
 	uint32_t priorityBit;
-	uint64_t io_u_plat_prio[DDIR_RWDIR_CNT][FIO_IO_U_PLAT_NR];
-	uint64_t io_u_plat_low_prio[DDIR_RWDIR_CNT][FIO_IO_U_PLAT_NR];
-	struct io_stat clat_prio_stat[DDIR_RWDIR_CNT];
-	struct io_stat clat_low_prio_stat[DDIR_RWDIR_CNT];
+	uint64_t io_u_plat_prio[FIO_IO_U_PLAT_NR];
+	uint64_t io_u_plat_low_prio[FIO_IO_U_PLAT_NR];
+	struct io_stat clat_prio_stat;
+	struct io_stat clat_low_prio_stat;
 
 	union {
 		uint64_t *ss_iops_data;
