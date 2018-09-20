@@ -478,7 +478,7 @@ static void show_ddir_status(struct group_run_stats *rs, struct thread_stat *ts,
 
 	if (ts->clat_percentiles || ts->lat_percentiles) {
 		const char *name = ts->clat_percentiles ? "clat" : " lat";
-		char prio_name[20];
+		char prio_name[32];
 		uint64_t samples;
 
 		if (ts->clat_percentiles)
@@ -493,13 +493,17 @@ static void show_ddir_status(struct group_run_stats *rs, struct thread_stat *ts,
 
         // Only print this if some priority stats were collected
 		if (ddir == DDIR_READ && ts->clat_prio_stat.samples > 0) {
-			sprintf(prio_name, "high prio %s", name);
+			sprintf(prio_name, "high prio (%.2f%%) %s",
+					100. * (double) ts->clat_prio_stat.samples / (double) samples,
+					name);
 			show_clat_percentiles(ts->io_u_plat_prio,
 						ts->clat_prio_stat.samples,
 						ts->percentile_list,
 						ts->percentile_precision, prio_name, out);
 
-			sprintf(prio_name, "low prio %s", name);
+			sprintf(prio_name, "low prio (%.2f%%) %s",
+					100. * (double) ts->clat_low_prio_stat.samples / (double) samples,
+					name);
 			show_clat_percentiles(ts->io_u_plat_low_prio,
 						ts->clat_low_prio_stat.samples,
 						ts->percentile_list,
@@ -1134,7 +1138,10 @@ static void add_ddir_status_json(struct thread_stat *ts,
 				mean = dev = 0.0;
 			}
 			tmp_object = json_create_object();
-			json_object_add_value_object(dir_object, "clat_prio", tmp_object);
+			json_object_add_value_object(dir_object, "clat_prio",
+					tmp_object);
+			json_object_add_value_int(tmp_object, "samples",
+					ts->clat_prio_stat.samples);
 			json_object_add_value_int(tmp_object, "min", min);
 			json_object_add_value_int(tmp_object, "max", max);
 			json_object_add_value_float(tmp_object, "mean", mean);
@@ -1188,6 +1195,8 @@ static void add_ddir_status_json(struct thread_stat *ts,
 			tmp_object = json_create_object();
 			json_object_add_value_object(dir_object, "clat_low_prio",
 					tmp_object);
+			json_object_add_value_int(tmp_object, "samples",
+					ts->clat_low_prio_stat.samples);
 			json_object_add_value_int(tmp_object, "min", min);
 			json_object_add_value_int(tmp_object, "max", max);
 			json_object_add_value_float(tmp_object, "mean", mean);
@@ -1634,7 +1643,6 @@ struct json_object *show_thread_status(struct thread_stat *ts,
 {
 	struct json_object *ret = NULL;
 
-	log_info("DEBUG: show_thread_status_json coming from show_thread_status\n");
 	if (output_format & FIO_OUTPUT_TERSE)
 		show_thread_status_terse(ts, rs,  out);
 	if (output_format & FIO_OUTPUT_JSON)
