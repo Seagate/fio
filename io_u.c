@@ -1838,7 +1838,6 @@ static void account_io_completion(struct thread_data *td, struct io_u *io_u,
 	}
 
 	if (ddir_rw(idx)) {
-
 		if (!td->o.disable_clat) {
 			add_clat_sample(td, idx, llnsec, bytes, io_u->offset);
 			io_u_mark_latency(td, llnsec);
@@ -2220,7 +2219,7 @@ int do_io_u_sync(const struct thread_data *td, struct io_u *io_u)
 	return ret;
 }
 
-int do_io_u_trim(struct thread_data *td, struct io_u *io_u)
+int do_io_u_trim(const struct thread_data *td, struct io_u *io_u)
 {
 #ifndef FIO_HAVE_TRIM
 	io_u->error = EINVAL;

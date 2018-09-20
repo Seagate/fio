@@ -423,8 +423,6 @@ static int wait_for_completions(struct thread_data *td, struct timespec *time)
 	int min_evts = 0;
 	int ret;
 
-
-
 	if (td->flags & TD_F_REGROW_LOGS)
 		return io_u_quiesce(td);
 
@@ -500,7 +498,6 @@ sync_done:
 
 		if (td->flags & TD_F_REGROW_LOGS)
 			regrow_logs(td);
-
 
 		/*
 		 * when doing I/O (not when verifying),

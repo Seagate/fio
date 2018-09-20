@@ -377,7 +377,7 @@ static int fio_vsyncio_commit(struct thread_data *td)
 static int fio_vsyncio_init(struct thread_data *td)
 {
 	struct syncio_data *sd;
-    
+
 	sd = malloc(sizeof(*sd));
 	memset(sd, 0, sizeof(*sd));
 	sd->last_offset = -1ULL;
@@ -386,7 +386,6 @@ static int fio_vsyncio_init(struct thread_data *td)
 	init_rand(&sd->rand_state, 0);
 
 	td->io_ops_data = sd;
-   
 	return 0;
 }
 

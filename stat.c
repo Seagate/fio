@@ -475,7 +475,6 @@ static void show_ddir_status(struct group_run_stats *rs, struct thread_stat *ts,
 	if (calc_lat(&ts->clat_prio_stat, &min, &max, &mean, &dev) && ddir == DDIR_READ)
 		display_lat("PRIO_clat", min, max, mean, dev, out);
 
-
 	if (ts->clat_percentiles || ts->lat_percentiles) {
 		const char *name = ts->clat_percentiles ? "clat" : " lat";
 		char prio_name[32];
