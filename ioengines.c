@@ -315,7 +315,7 @@ enum fio_q_status td_io_queue(struct thread_data *td, struct io_u *io_u)
 	if (fio_option_is_set(o, ioprio) ||
 	    fio_option_is_set(o, ioprio_class)) {
 
-	    if ( io_u->ddir == DDIR_READ) { //What if there is more than one request?
+	    if ( io_u->ddir == DDIR_READ) {
 	        if (o->prio_percent) {
 	            if ((rand()%100 >= o->prio_percent) == 0) {
 	                dprint(FD_IO, "Enable PRIO \n");

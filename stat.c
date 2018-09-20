@@ -800,8 +800,7 @@ static void show_ss_normal(struct thread_stat *ts, struct buf_output *out)
 
 static void show_thread_status_normal(struct thread_stat *ts,
 				      struct group_run_stats *rs,
-				      struct buf_output *out,
-				      struct flist_head *opt_list)
+				      struct buf_output *out)
 {
 	double usr_cpu, sys_cpu;
 	unsigned long runtime;
@@ -1648,7 +1647,7 @@ struct json_object *show_thread_status(struct thread_stat *ts,
 	if (output_format & FIO_OUTPUT_JSON)
 		ret = show_thread_status_json(ts, rs, opt_list);
 	if (output_format & FIO_OUTPUT_NORMAL)
-		show_thread_status_normal(ts, rs,  out, opt_list);
+		show_thread_status_normal(ts, rs, out);
 
 	return ret;
 }
@@ -2098,7 +2097,7 @@ void __show_run_stats(void)
 				json_array_add_value_object(array, tmp);
 			}
 			if (output_format & FIO_OUTPUT_NORMAL)
-				show_thread_status_normal(ts, rs, &output[__FIO_OUTPUT_NORMAL], opt_lists[i]);
+				show_thread_status_normal(ts, rs, &output[__FIO_OUTPUT_NORMAL]);
 		}
 	}
 	if (!is_backend && (output_format & FIO_OUTPUT_JSON)) {

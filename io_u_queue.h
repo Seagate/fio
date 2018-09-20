@@ -30,7 +30,7 @@ static inline struct io_u *io_u_qpop(struct io_u_queue *q)
 static inline void io_u_qpush(struct io_u_queue *q, struct io_u *io_u)
 {
 	if (q->nr < q->max) {
-		q->io_us[q->nr++] = io_u;		
+		q->io_us[q->nr++] = io_u;
 		return;
 	}
 
