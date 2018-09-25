@@ -135,6 +135,7 @@ enum {
 	FIO_RAND_ZONE_OFF,
 	FIO_RAND_POISSON2_OFF,
 	FIO_RAND_POISSON3_OFF,
+	FIO_RAND_PRIO_OFF,
 	FIO_RAND_NR_OFFS,
 };
 
@@ -173,7 +174,6 @@ struct zone_split_index {
  * This describes a single thread/process executing a fio job.
  */
 struct thread_data {
-	unsigned int priority_bit;
 	struct flist_head opt_list;
 	unsigned long flags;
 	struct thread_options o;
@@ -435,6 +435,12 @@ struct thread_data {
 	int first_error;
 
 	struct fio_flow *flow;
+
+	/*
+	 * For toggling prio/prioclass on reads
+	 */
+	unsigned int priority_bit;
+	struct frand_state prio_state;
 
 	/*
 	 * Can be overloaded by profiles

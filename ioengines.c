@@ -318,7 +318,7 @@ enum fio_q_status td_io_queue(struct thread_data *td, struct io_u *io_u)
 
 	    if ( io_u->ddir == DDIR_READ) {
 	        if (o->prio_percent) {
-	            if ((rand()%100 >= o->prio_percent) == 0) {
+	            if (rand_between(&td->prio_state, 0, 99) < o->prio_percent) {
 	                dprint(FD_IO, "Enable PRIO \n");
 	                prio_ret = ioprio_set(IOPRIO_WHO_PROCESS, 0, o->ioprio_class, o->ioprio);
 	                io_u->priority_bit = 1;
