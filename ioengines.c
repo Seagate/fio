@@ -282,6 +282,8 @@ enum fio_q_status td_io_queue(struct thread_data *td, struct io_u *io_u)
 	const enum fio_ddir ddir = acct_ddir(io_u);
 	unsigned long long buflen = io_u->xfer_buflen;
 	enum fio_q_status ret;
+	struct thread_options* o = &td->o;
+	int prio_ret = 0;
 
 	dprint_io_u(io_u, "queue");
 	fio_ro_check(td, io_u);
@@ -310,6 +312,38 @@ enum fio_q_status td_io_queue(struct thread_data *td, struct io_u *io_u)
 			memcpy(&td->last_issue, &io_u->issue_time,
 					sizeof(io_u->issue_time));
 	}
+
+	if (fio_option_is_set(o, ioprio) ||
+	    fio_option_is_set(o, ioprio_class)) {
+
+	    if ( io_u->ddir == DDIR_READ) {
+	        if (o->prio_percent) {
+	            if ((rand()%100 >= o->prio_percent) == 0) {
+	                dprint(FD_IO, "Enable PRIO \n");
+	                prio_ret = ioprio_set(IOPRIO_WHO_PROCESS, 0, o->ioprio_class, o->ioprio);
+	                io_u->priority_bit = 1;
+
+	            } else {
+	                dprint(FD_IO, "Disable PRIO \n");
+	                prio_ret = ioprio_set(IOPRIO_WHO_PROCESS, 0, 0, 0);
+	                io_u->priority_bit = 0;
+	            }
+	        }
+	    } else {
+	        /* This is here so if previous READ turned this off.
+	         * This will make sure the behavior is consistant.
+	         */
+	        prio_ret = ioprio_set(IOPRIO_WHO_PROCESS, 0, o->ioprio_class, o->ioprio);
+	        io_u->priority_bit = 1;
+	    }
+	    if (prio_ret == -1) {
+			td_verror(td, errno, "ioprio_set");
+			log_info("fio: pid=%d, err=%d/%s\n", (int) td->pid, td->error,
+								td->verror);
+		}
+
+	}
+
 
 	if (ddir_rw(ddir)) {
 		if (!(io_u->flags & IO_U_F_VER_LIST)) {

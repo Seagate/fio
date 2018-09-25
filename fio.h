@@ -173,6 +173,7 @@ struct zone_split_index {
  * This describes a single thread/process executing a fio job.
  */
 struct thread_data {
+	unsigned int priority_bit;
 	struct flist_head opt_list;
 	unsigned long flags;
 	struct thread_options o;
@@ -456,7 +457,7 @@ struct thread_data {
 	CUdevice  cu_dev;
 	CUcontext cu_ctx;
 	CUdeviceptr dev_mem_ptr;
-#endif	
+#endif
 
 };
 

@@ -570,8 +570,8 @@ static unsigned long long get_next_buflen(struct thread_data *td, struct io_u *i
 		power_2 = is_power_of_2(minbs);
 		if (!td->o.bs_unaligned && power_2)
 			buflen &= ~(minbs - 1);
-		else if (!td->o.bs_unaligned && !power_2) 
-			buflen -= buflen % minbs; 
+		else if (!td->o.bs_unaligned && !power_2)
+			buflen -= buflen % minbs;
 	} while (!io_u_fits(td, io_u, buflen));
 
 	return buflen;
@@ -1807,6 +1807,8 @@ static void account_io_completion(struct thread_data *td, struct io_u *io_u,
 
 	if (td->parent)
 		td = td->parent;
+
+	td->priority_bit = io_u->priority_bit;
 
 	if (!td->o.stats || td_ioengine_flagged(td, FIO_NOSTATS))
 		return;
