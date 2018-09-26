@@ -1257,7 +1257,7 @@ static int handle_connection(struct sk_out *sk_out)
 	_exit(ret);
 }
 
-/* get the address on this host bound by the input socket, 
+/* get the address on this host bound by the input socket,
  * whether it is ipv6 or ipv4 */
 
 static int get_my_addr_str(int sk)
@@ -1984,7 +1984,7 @@ int fio_send_iolog(struct thread_data *td, struct io_log *log, const char *name)
 
 			s->time		= cpu_to_le64(s->time);
 			s->data.val	= cpu_to_le64(s->data.val);
-			s->__ddir	= cpu_to_le32(s->__ddir);
+			s->__ddir	= __cpu_to_le32(s->__ddir);
 			s->bs		= cpu_to_le64(s->bs);
 
 			if (log->log_offset) {
