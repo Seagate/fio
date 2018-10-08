@@ -223,7 +223,6 @@ struct thread_options {
 	unsigned int nice;
 	unsigned int ioprio;
 	unsigned int ioprio_class;
-	unsigned int prio_percent;
 	unsigned int file_service_type;
 	unsigned int group_reporting;
 	unsigned int stats;
