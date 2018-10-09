@@ -18,6 +18,10 @@
 #define IOCB_FLAG_IOPRIO    (1 << 1)
 #endif
 
+#ifndef FIO_RANDSEED
+#define FIO_RANDSEED		(0xb1899bedUL)
+#endif
+
 static int fio_libaio_commit(struct thread_data *td);
 static int fio_libaio_init(struct thread_data *td);
 
@@ -26,6 +30,11 @@ struct libaio_data {
 	struct io_event *aio_events;
 	struct iocb **iocbs;
 	struct io_u **io_us;
+	/*
+	 * For toggling libaio priority_percent option
+	 */
+	unsigned long prio_seed;
+	struct frand_state prio_state;
 
 	/*
 	 * Basic ring buffer. 'head' is incremented in _queue(), and
@@ -112,7 +121,8 @@ static int fio_libaio_prep(struct thread_data fio_unused *td, struct io_u *io_u)
 static void fio_libaio_prio_prep(struct thread_data *td, struct io_u *io_u)
 {
 	struct libaio_options *o = td->eo;
-	if (rand_between(&td->prio_state, 0, 99) < o->prio_percent) {
+	struct libaio_data *ld = td->io_ops_data;
+	if (rand_between(&ld->prio_state, 0, 99) < o->prio_percent) {
 		dprint(FD_IO, "Enable PRIO \n");
 		io_u->iocb.aio_reqprio = IOPRIO_CLASS_RT << IOPRIO_CLASS_SHIFT | td->o.ioprio;
 		io_u->iocb.u.c.flags |= IOCB_FLAG_IOPRIO;
@@ -434,10 +444,16 @@ static int fio_libaio_init(struct thread_data *td)
 	ld->io_us = calloc(ld->entries, sizeof(struct io_u *));
 
 	td->io_ops_data = ld;
+	/*
+	 * Initialize prio_percent mechanisms if relevant
+	 */
 	if (!(fio_option_is_set(to, ioprio) ||
 			fio_option_is_set(to, ioprio_class) ||
 			(o->prio_percent == 0))) {
 		ioengine.prio_prep = fio_libaio_prio_prep;
+		ld->prio_seed = FIO_RANDSEED * td->thread_number
+				+ FIO_RAND_NR_OFFS;
+		init_rand_seed(&ld->prio_state, ld->prio_seed, false);
 	}
 	else if (o->prio_percent != 0) {
 		log_err("%s: prio_percent option and mutually exclusive "

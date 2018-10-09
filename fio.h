@@ -135,7 +135,6 @@ enum {
 	FIO_RAND_ZONE_OFF,
 	FIO_RAND_POISSON2_OFF,
 	FIO_RAND_POISSON3_OFF,
-	FIO_RAND_PRIO_OFF,
 	FIO_RAND_NR_OFFS,
 };
 
@@ -435,12 +434,6 @@ struct thread_data {
 	int first_error;
 
 	struct fio_flow *flow;
-
-	/*
-	 * For toggling prio/prioclass on reads
-	 */
-	unsigned int priority_bit;
-	struct frand_state prio_state;
 
 	/*
 	 * Can be overloaded by profiles

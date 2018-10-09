@@ -318,11 +318,11 @@ extern void update_rusage_stat(struct thread_data *);
 extern void clear_rusage_stat(struct thread_data *);
 
 extern void add_lat_sample(struct thread_data *, enum fio_ddir, unsigned long long,
-				unsigned long long, uint64_t);
+				unsigned long long, uint64_t, bool);
 extern void add_clat_sample(struct thread_data *, enum fio_ddir, unsigned long long,
-				unsigned long long, uint64_t);
+				unsigned long long, uint64_t, bool);
 extern void add_slat_sample(struct thread_data *, enum fio_ddir, unsigned long,
-				unsigned long long, uint64_t);
+				unsigned long long, uint64_t, bool);
 extern void add_agg_sample(union io_sample_data, enum fio_ddir, unsigned long long bs,
 				unsigned int priority_bit);
 extern void add_iops_sample(struct thread_data *, struct io_u *,

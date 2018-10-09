@@ -1808,8 +1808,6 @@ static void account_io_completion(struct thread_data *td, struct io_u *io_u,
 	if (td->parent)
 		td = td->parent;
 
-	td->priority_bit = io_u->priority_bit;
-
 	if (!td->o.stats || td_ioengine_flagged(td, FIO_NOSTATS))
 		return;
 
@@ -1820,7 +1818,7 @@ static void account_io_completion(struct thread_data *td, struct io_u *io_u,
 		unsigned long long tnsec;
 
 		tnsec = ntime_since(&io_u->start_time, &icd->time);
-		add_lat_sample(td, idx, tnsec, bytes, io_u->offset);
+		add_lat_sample(td, idx, tnsec, bytes, io_u->offset, io_u->priority_bit);
 
 		if (td->flags & TD_F_PROFILE_OPS) {
 			struct prof_io_ops *ops = &td->prof_io_ops;
@@ -1839,7 +1837,7 @@ static void account_io_completion(struct thread_data *td, struct io_u *io_u,
 
 	if (ddir_rw(idx)) {
 		if (!td->o.disable_clat) {
-			add_clat_sample(td, idx, llnsec, bytes, io_u->offset);
+			add_clat_sample(td, idx, llnsec, bytes, io_u->offset, io_u->priority_bit);
 			io_u_mark_latency(td, llnsec);
 		}
 
@@ -2091,7 +2089,7 @@ void io_u_queued(struct thread_data *td, struct io_u *io_u)
 			td = td->parent;
 
 		add_slat_sample(td, io_u->ddir, slat_time, io_u->xfer_buflen,
-				io_u->offset);
+				io_u->offset, io_u->priority_bit);
 	}
 }
 

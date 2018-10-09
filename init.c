@@ -1053,7 +1053,6 @@ static void td_fill_rand_seeds_internal(struct thread_data *td, bool use64)
 	init_rand_seed(&td->poisson_state[2], td->rand_seeds[FIO_RAND_POISSON3_OFF], 0);
 	init_rand_seed(&td->dedupe_state, td->rand_seeds[FIO_DEDUPE_OFF], false);
 	init_rand_seed(&td->zone_state, td->rand_seeds[FIO_RAND_ZONE_OFF], false);
-	init_rand_seed(&td->prio_state, td->rand_seeds[FIO_RAND_PRIO_OFF], false);
 
 	if (!td_random(td))
 		return;
