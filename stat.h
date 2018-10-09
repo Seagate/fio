@@ -238,7 +238,7 @@ struct thread_stat {
 	fio_fp64_t ss_deviation;
 	fio_fp64_t ss_criterion;
 
-	uint32_t priority_bit;
+	bool priority_bit;
 	uint64_t io_u_plat_prio[FIO_IO_U_PLAT_NR];
 	uint64_t io_u_plat_low_prio[FIO_IO_U_PLAT_NR];
 	struct io_stat clat_prio_stat;

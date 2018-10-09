@@ -1558,6 +1558,14 @@ void fio_server_send_ts(struct thread_stat *ts, struct group_run_stats *rs)
 	p.ts.ss_deviation.u.i	= cpu_to_le64(fio_double_to_uint64(ts->ss_deviation.u.f));
 	p.ts.ss_criterion.u.i	= cpu_to_le64(fio_double_to_uint64(ts->ss_criterion.u.f));
 
+	p.ts.priority_bit = ts->priority_bit;
+	for (i = 0; i < FIO_IO_U_PLAT_NR; i++) {
+		p.ts.io_u_plat_prio[i] = cpu_to_le64(ts->io_u_plat_prio[i]);
+		p.ts.io_u_plat_low_prio[i] = cpu_to_le64(ts->io_u_plat_low_prio[i]);
+	}
+	convert_io_stat(&p.ts.clat_prio_stat, &ts->clat_prio_stat);
+	convert_io_stat(&p.ts.clat_low_prio_stat, &ts->clat_low_prio_stat);
+
 	convert_gs(&p.rs, rs);
 
 	dprint(FD_NET, "ts->ss_state = %d\n", ts->ss_state);
