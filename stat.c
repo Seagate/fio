@@ -1986,7 +1986,6 @@ void __show_run_stats(void)
 			ts->block_infos[k] = td->ts.block_infos[k];
 
 		sum_thread_stats(ts, &td->ts, idx == 1);
-		ts->nr_zone_resets += td->ts.nr_zone_resets;
 
 		if (td->o.ss_dur) {
 			ts->ss_state = td->ss.state;
@@ -2014,7 +2013,6 @@ void __show_run_stats(void)
 		rs->unit_base = ts->unit_base;
 		rs->sig_figs = ts->sig_figs;
 		rs->unified_rw_rep += ts->unified_rw_rep;
-		rs->nr_zone_resets += ts->nr_zone_resets;
 
 		for (j = 0; j < DDIR_RWDIR_CNT; j++) {
 			if (!ts->runtime[j])
