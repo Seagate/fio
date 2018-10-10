@@ -3255,6 +3255,8 @@ struct fio_option fio_options[FIO_MAX_OPTS] = {
 		.help	= "Your platform does not support IO scheduler switching",
 	},
 #endif
+
+	/* Parameters for zones defined in the fio job */
 	{
 		.name	= "zonemode",
 		.lname	= "Zone mode",
@@ -3312,6 +3314,8 @@ struct fio_option fio_options[FIO_MAX_OPTS] = {
 		.category = FIO_OPT_C_IO,
 		.group	= FIO_OPT_G_ZONE,
 	},
+
+	/* Parameters for zoned block devices */
 	{
 		.name	= "read_beyond_wp",
 		.lname	= "Allow reads beyond the zone write pointer",
@@ -3458,6 +3462,12 @@ struct fio_option fio_options[FIO_MAX_OPTS] = {
 	{
 		.name	= "prioclass",
 		.lname	= "I/O nice priority class",
+		.type	= FIO_OPT_UNSUPPORTED,
+		.help	= "Your platform does not support IO priority classes",
+	},
+	{
+		.name	= "prio_percent",
+		.lname	= "prio percentage",
 		.type	= FIO_OPT_UNSUPPORTED,
 		.help	= "Your platform does not support IO priority classes",
 	},
