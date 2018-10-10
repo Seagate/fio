@@ -241,8 +241,8 @@ struct thread_stat {
 	bool priority_bit;
 	uint64_t io_u_plat_prio[FIO_IO_U_PLAT_NR];
 	uint64_t io_u_plat_low_prio[FIO_IO_U_PLAT_NR];
-	struct io_stat clat_prio_stat;
-	struct io_stat clat_low_prio_stat;
+	struct io_stat clat_prio_stat __attribute__((aligned(8)));
+	struct io_stat clat_low_prio_stat __attribute__((aligned(8)));
 
 	union {
 		uint64_t *ss_iops_data;
@@ -334,7 +334,7 @@ extern void add_sync_clat_sample(struct thread_stat *ts,
 extern int calc_log_samples(void);
 
 extern struct io_log *agg_io_log[DDIR_RWDIR_CNT];
-extern int write_bw_log;
+extern bool write_bw_log;
 
 static inline bool nsec_to_usec(unsigned long long *min,
 				unsigned long long *max, double *mean,
