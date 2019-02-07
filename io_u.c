@@ -885,7 +885,10 @@ static int fill_io_u(struct thread_data *td, struct io_u *io_u)
 	bool is_random;
 	uint64_t offset;
 	enum io_u_action ret;
+	uint32_t retries;
+	retries = 0;
 
+get_io_u:
 	if (td_ioengine_flagged(td, FIO_NOIO))
 		goto out;
 
@@ -920,6 +923,17 @@ static int fill_io_u(struct thread_data *td, struct io_u *io_u)
 		ret = zbd_adjust_block(td, io_u);
 		if (ret == io_u_eof)
 			return 1;
+		else if (ret == io_u_retry) {
+			retries++;
+			if (retries > 1000) {
+			dprint(FD_ZBD, "Exiting random workload after picking %d write "
+				   "offsets with skip reset option set (offset 0x%llx)\n",
+				   retries,
+				   (unsigned long long) io_u->offset);
+			return 1;
+			}
+			goto get_io_u;
+		}
 	}
 
 	if (io_u->offset + io_u->buflen > io_u->file->real_file_size) {

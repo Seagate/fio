@@ -21,6 +21,454 @@
 #include "verify.h"
 #include "zbd.h"
 
+#define INQ_CMD_CODE 0x12
+#define INQ_LEN 6
+#define RZ_CMD_CODE 0x4A
+#define SCSI_RZ_CMD_CODE 0x95
+#define REZ_CMD_CODE 0x9F
+#define SCSI_REZ_CMD_CODE 0x94
+#define RC16_CMD_CODE 0x9E
+#define PT_PROTOCOL_DMA 0x0D	// DMA protocol and Extend bit
+#define PT_PROTOCOL_ND 0x07	// Non-data and Extend bit
+// 0 second timeout, TDIR_IN, BYT_BLOCK set, T_LENGTH set to 2 to use sector count
+#define MISC_BYTE 0x0E
+#define PT_CMD_CODE 0x85
+#define PT_CMD_LEN 16
+#define HDR_SIZE 64
+#define ZONE_INFO_SIZE 64
+
+// Function declarations
+static int zbd_reset_zone(struct thread_data *td, const struct fio_file *f,
+			  struct fio_zone_info *z);
+
+/**
+ * os_is_little_endian - check OS endianess for a
+ * uint32_t, assumes same endianess for other
+ * unsigned integers
+ */
+static bool os_is_little_endian() {
+	uint32_t test_int = 0x0A0B0C0D;
+	unsigned char* byte_pointer;
+	byte_pointer = (unsigned char*) &test_int;
+	if (byte_pointer[0] == 0x0A)
+		return false;
+	else if (byte_pointer[0] == 0x0D)
+		return true;
+	else
+		log_err("Environment seems to be neither big or little endian\n");
+	return true;
+}
+
+/**
+ * unpack_bytes - unpack unsigned integers of arbitrary
+ * length from byte buffers
+ */
+static void unpack_bytes(unsigned char* byte_buf, unsigned int num_bytes,
+					bool little_endian, void* ret_var) {
+	int ind;
+	unsigned char* ret_bytes;
+	static bool need_init = true;
+	static bool os_little_endian = false;
+	if (need_init) {
+		os_little_endian = os_is_little_endian();
+		need_init = false;
+	}
+	ret_bytes = ret_var;
+	for (ind = 0; ind < num_bytes; ind++) {
+		if (little_endian == os_little_endian)
+			ret_bytes[ind] = byte_buf[ind];
+		else
+			ret_bytes[ind] = byte_buf[num_bytes - 1 - ind];
+	}
+}
+
+/**
+ * sg_send_cdb - send generic CDBs
+ * @fd: file descriptor
+ * @cdb_buf: command descriptor block buffer
+ * @cdb_len: length of cdb buffer
+ * @data_buf: buffer to hold outgoing or incoming data
+ * @bufsz: size of data_buf
+ * @io_hdr_pt: pointer to io_hdr. Can be set to NULL or checked
+ *			after running command for various information
+ */
+static int sg_send_cdb(int fd, unsigned char* cdb_buf, unsigned char cdb_len,
+				void *data_buf, unsigned int bufsz, sg_io_hdr_t* io_hdr_pt) {
+	sg_io_hdr_t io_hdr;
+	unsigned char sense_buffer[64];
+
+	if (io_hdr_pt == NULL)
+		io_hdr_pt = &io_hdr;
+	/* Prepare SCSI command */
+	memset(&io_hdr, 0, sizeof(sg_io_hdr_t));
+	io_hdr_pt->interface_id = 'S';
+	io_hdr_pt->cmd_len = cdb_len;
+	/* io_hdr_pt->iovec_count = 0; */  /* memset takes care of this */
+	io_hdr_pt->mx_sb_len = sizeof(sense_buffer);
+	io_hdr_pt->dxfer_direction = SG_DXFER_FROM_DEV;
+	io_hdr_pt->dxfer_len = bufsz;
+	io_hdr_pt->dxferp = data_buf;
+	io_hdr_pt->cmdp = cdb_buf;
+	io_hdr_pt->sbp = sense_buffer;
+	// Maybe should let users set these themselves somehow
+	io_hdr_pt->timeout = 30000;     /* 30000 millisecs == 30 seconds */
+	/* io_hdr_pt->flags = 0; */     /* take defaults: indirect IO, etc */
+	/* io_hdr_pt->pack_id = 0; */
+	/* io_hdr_pt->usr_ptr = NULL; */
+
+	if (ioctl(fd, SG_IO, io_hdr_pt) < 0) {
+		return -errno;
+	}
+
+	/* now for the error processing */
+	if ((io_hdr_pt->info & SG_INFO_OK_MASK) != SG_INFO_OK) {
+		dprint(FD_ZBD, "Error sending following CDB:\n");
+		if (1 << FD_ZBD & fio_debug) {
+			for (int k = 0; k < cdb_len; k++)
+				log_info("%02X ", cdb_buf[k]);
+			log_info("\nCommand returned with following sense buffer:\n");
+			for (int k = 0; k < 64; k++)
+				log_info("%02X ", sense_buffer[k]);
+			log_info("\n");
+		}
+		return -EBADE;
+	}
+	return 0;
+}
+
+static int sg_get_flex(int fd, bool* is_flex) {
+	unsigned char rle_cmd_blk[16];
+	unsigned char ret_buf[512];
+	int ret;
+
+	rle_cmd_blk[0] = 0x85;
+	rle_cmd_blk[1] = 0x09;
+	rle_cmd_blk[2] = 0x0E;
+	// Features
+	rle_cmd_blk[3] = 0x00;
+	rle_cmd_blk[4] = 0x00;
+	// Upper and lower page count
+	rle_cmd_blk[5] = 0;
+	rle_cmd_blk[6] = 1;
+	// Reserved
+	rle_cmd_blk[7] = 0x00;
+	// Log address
+	rle_cmd_blk[8] = 0x30;
+	// Upper and lower page number
+	rle_cmd_blk[9] = 0x00;
+	rle_cmd_blk[10] = 0x03;
+	// Reserved
+	rle_cmd_blk[11] = 0x00;
+	rle_cmd_blk[12] = 0x00;
+	// Device byte
+	rle_cmd_blk[13] = 0x00;
+	// Read Log Extended op code
+	rle_cmd_blk[14] = 0x2F;
+	// Control byte
+	rle_cmd_blk[15] = 0x00;
+
+	ret = sg_send_cdb(fd, rle_cmd_blk, 16, ret_buf, 512, NULL);
+	if (ret < 0)
+		return ret;
+
+	*is_flex = (bool) (ret_buf[105] & 1);
+	return 0;
+}
+
+/**
+ * sg_get_protocol - Get first 36 bytes of inquiry
+ * and parse the vendor string to see if device is ATA
+ * @fd: file descriptor
+ * @is_sas: True if not SATA
+ */
+int sg_get_protocol(int fd, bool* is_sas)
+{
+	unsigned char inq_cmd_blk[6];
+	unsigned char ret_buf[36];
+	int ret;
+
+	inq_cmd_blk[0] = INQ_CMD_CODE;
+	inq_cmd_blk[1] = 0;  // EVPD
+	inq_cmd_blk[2] = 0;  // Page Code
+	inq_cmd_blk[3] = 0;  // Allocation bytes - MSB
+	inq_cmd_blk[4] = 36;  // allocation bytes - LSB
+	inq_cmd_blk[5] = 0;
+
+	ret = sg_send_cdb(fd, inq_cmd_blk, INQ_LEN, ret_buf, 36, NULL);
+	if (ret < 0)
+		return ret;
+
+	ret_buf[16] = '\0';
+	*is_sas = strcmp((char*) &ret_buf[8], "ATA     ") != 0;
+	return 0;
+}
+
+/**
+ * sg_read_capacity - issue a read capacity command to
+ * get the block size of the device
+ * @fd: file descriptor
+ * @block_size: returned block size
+ */
+int sg_read_capacity(int fd, uint32_t* block_size)
+{
+	unsigned char rcCmdBlk[16];
+	unsigned char retBuf[4096];
+	int ret;
+
+	rcCmdBlk[0] = RC16_CMD_CODE;
+	rcCmdBlk[1] = 0x10;  // Service action (like a subfunction code)
+	rcCmdBlk[2] = 0;  // Obsolete LBA field
+	rcCmdBlk[3] = 0;
+	rcCmdBlk[4] = 0;
+	rcCmdBlk[5] = 0;
+	rcCmdBlk[6] = 0;
+	rcCmdBlk[7] = 0;
+	rcCmdBlk[8] = 0;
+	rcCmdBlk[9] = 0;
+	rcCmdBlk[10] = 0;  // Allocation length (return 4k bytes)
+	rcCmdBlk[11] = 0;
+	rcCmdBlk[12] = 1;
+	rcCmdBlk[13] = 0;
+	rcCmdBlk[14] = 0;  // Obsolete PMI byte
+	rcCmdBlk[15] = 0;  // Control byte
+
+	ret = sg_send_cdb(fd, rcCmdBlk, 16, retBuf, 4096, NULL);
+	if (ret < 0)
+		return ret;
+
+	unpack_bytes(&retBuf[8], 4, false, block_size);
+	return 0;
+}
+
+/**
+ * sg_report_zones - get zones by issuing the report zones CDB directly
+ * @fd: file descriptor
+ * @start_sector: first sector to report zones from
+ * @buf: buffer to hold return data in
+ * @bufsz: size of buf
+ * @use_scsi: whether to use SCSI report zones or pass through ATA command
+ *				SCSI command might be usable for both, depending on sat4
+ *				layer
+ */
+static int sg_report_zones(int fd, uint64_t start_lba, void *buf,
+							unsigned int bufsz, bool use_scsi) {
+	uint8_t reporting_options = 0;
+	uint16_t sector_count;
+	unsigned char rzCmdBlk[PT_CMD_LEN];
+
+	if (use_scsi) {
+		rzCmdBlk[0] = SCSI_RZ_CMD_CODE;
+		rzCmdBlk[1] = 0;
+		rzCmdBlk[2] = (start_lba >> 56) & 0xFF;
+		rzCmdBlk[3] = (start_lba >> 48) & 0xFF;
+		rzCmdBlk[4] = (start_lba >> 40) & 0xFF;
+		rzCmdBlk[5] = (start_lba >> 32) & 0xFF;
+		rzCmdBlk[6] = (start_lba >> 24) & 0xFF;
+		rzCmdBlk[7] = (start_lba >> 16) & 0xFF;
+		rzCmdBlk[8] = (start_lba >> 8) & 0xFF;
+		rzCmdBlk[9] = start_lba & 0xFF;
+		rzCmdBlk[10] = (bufsz >> 24) & 0xFF;
+		rzCmdBlk[11] = (bufsz >> 16) & 0xFF;
+		rzCmdBlk[12] = (bufsz >> 8) & 0xFF;
+		rzCmdBlk[13] = bufsz & 0xFF;
+		rzCmdBlk[14] = reporting_options;
+		rzCmdBlk[15] = 0;
+	}
+	else {
+		sector_count = bufsz / 512;  // This count is always in 512 blocks as per specification
+
+		rzCmdBlk[0] = PT_CMD_CODE;
+		rzCmdBlk[1] = PT_PROTOCOL_DMA;
+		rzCmdBlk[2] = MISC_BYTE;
+		rzCmdBlk[3] = (unsigned char) reporting_options;
+		rzCmdBlk[4] = 0;
+		rzCmdBlk[5] = (unsigned char) (sector_count >> 8) & 0xFF;
+		rzCmdBlk[6] = (unsigned char) sector_count & 0xFF;
+		rzCmdBlk[7] = (unsigned char) (start_lba >> 24) & 0xFF;
+		rzCmdBlk[8] = (unsigned char) start_lba & 0xFF;
+		rzCmdBlk[9] = (unsigned char) (start_lba >> 32) & 0xFF;
+		rzCmdBlk[10] = (unsigned char) (start_lba >> 8) & 0xFF;
+		rzCmdBlk[11] = (unsigned char) (start_lba >> 40) & 0xFF;
+		rzCmdBlk[12] = (unsigned char) (start_lba >> 16) & 0xFF;
+		rzCmdBlk[13] = 0;
+		rzCmdBlk[14] = RZ_CMD_CODE;
+		rzCmdBlk[15] = 0;
+	}
+
+	return sg_send_cdb(fd, rzCmdBlk, PT_CMD_LEN, buf, bufsz, NULL);
+}
+
+/**
+ * sg_reset_zones - reset all zones specified by zr parameter
+ * @fd: file descriptor
+ * @zr: start and number of zones to reset
+ * @block_size: logical block size of device in bytes -- used to convert
+ *				sectors from zr into LBAs
+ * @zone_size: sectors per zone
+ * @use_scsi: whether to use the SCSI or the ATA command
+ */
+static int sg_reset_zones(int fd, struct blk_zone_range* zr, uint32_t block_size,
+		uint64_t zone_size, bool use_scsi) {
+	uint8_t sub_cmd = 4;
+	unsigned char rez_cmd_blk[PT_CMD_LEN];
+	uint16_t sec_per_lba = block_size / 512;
+	uint64_t cur_lba, last_lba;
+	int ret = 0;
+
+	zone_size = zone_size / sec_per_lba;
+	cur_lba = zr->sector / sec_per_lba;
+	last_lba = cur_lba + (zr->nr_sectors / sec_per_lba);
+
+	if (use_scsi) {
+		rez_cmd_blk[0] = SCSI_REZ_CMD_CODE;
+		// Service action
+		rez_cmd_blk[1] = 0x4;
+		// Reserved
+		rez_cmd_blk[10] = 0;
+		rez_cmd_blk[11] = 0;
+		// Sector size -- for now this seems to abort if 0 is not sent
+		rez_cmd_blk[12] = 0;
+		rez_cmd_blk[13] = 0;
+		// Reset all can be set here
+		rez_cmd_blk[14] = 0;
+		rez_cmd_blk[15] = 0;
+		while (cur_lba < last_lba) {
+			// Set LBAs
+			rez_cmd_blk[2] = (unsigned char) (cur_lba >> 56) & 0xFF;
+			rez_cmd_blk[3] = (unsigned char) (cur_lba >> 48) & 0xFF;
+			rez_cmd_blk[4] = (unsigned char) (cur_lba >> 40) & 0xFF;
+			rez_cmd_blk[5] = (unsigned char) (cur_lba >> 32) & 0xFF;
+			rez_cmd_blk[6] = (unsigned char) (cur_lba >> 24) & 0xFF;
+			rez_cmd_blk[7] = (unsigned char) (cur_lba >> 16) & 0xFF;
+			rez_cmd_blk[8] = (unsigned char) (cur_lba >> 8) & 0xFF;
+			rez_cmd_blk[9] = (unsigned char) cur_lba & 0xFF;
+			ret = sg_send_cdb(fd, rez_cmd_blk, PT_CMD_LEN, NULL, 0, NULL);
+			if (ret != 0)
+				return ret;
+			cur_lba += zone_size;
+		}
+	}
+	else {
+		rez_cmd_blk[0] = PT_CMD_CODE;
+		rez_cmd_blk[1] = PT_PROTOCOL_ND;
+		// Non-data command doesn't need to use this byte
+		rez_cmd_blk[2] = 0;
+		// Features high used for resetting all zones
+		rez_cmd_blk[3] = 0;
+		// Features low used for sub command
+		rez_cmd_blk[4] = sub_cmd;
+		// This might be usable for multiple sectors, but can't count on it
+		// for now
+		rez_cmd_blk[5] = 0;
+		rez_cmd_blk[6] = 0;
+		// Unused device byte
+		rez_cmd_blk[13] = 0;
+		rez_cmd_blk[14] = REZ_CMD_CODE;
+		rez_cmd_blk[15] = 0;
+		while (cur_lba < last_lba) {
+			// Set LBAs
+			rez_cmd_blk[7] = (unsigned char) (cur_lba >> 24) & 0xFF;
+			rez_cmd_blk[8] = (unsigned char) cur_lba & 0xFF;
+			rez_cmd_blk[9] = (unsigned char) (cur_lba >> 32) & 0xFF;
+			rez_cmd_blk[10] = (unsigned char) (cur_lba >> 8) & 0xFF;
+			rez_cmd_blk[11] = (unsigned char) (cur_lba >> 40) & 0xFF;
+			rez_cmd_blk[12] = (unsigned char) (cur_lba >> 16) & 0xFF;
+			ret = sg_send_cdb(fd, rez_cmd_blk, PT_CMD_LEN, NULL, 0, NULL);
+			if (ret != 0)
+				return ret;
+			cur_lba += zone_size;
+		}
+	}
+
+	return ret;
+}
+
+/**
+ * parse_to_structs - parse return from sg_report_zones
+ * into a format similar to that returned by
+ * ioctl(fd, BLKREPORTZONE, buf)
+ * @buf: buffer written into by sg_report_zones
+ * @bufsz: size of buffer written into by sg_report_zones
+ * @secPerLba: number of linux 512 sectors per reported LBA
+ */
+static int parse_to_structs(unsigned char* buf, unsigned int bufsz,
+	                        unsigned int secPerLba, bool use_scsi) {
+	uint32_t num_zones;
+	uint8_t zone_type;
+	uint8_t zone_cond;
+	uint64_t zone_size;
+	uint64_t zone_start;
+	uint64_t write_pointer;
+	struct blk_zone_report *hdr;
+	struct blk_zone *zone_struct;
+	unsigned int struct_offset;
+	unsigned int data_offset;
+	unsigned char* cur_zone;
+	if (sizeof(struct blk_zone_report) > HDR_SIZE) {
+		log_err("Cannot parse zone information in place if blk_zone_report "
+				"structure is bigger than the raw data\n");
+		return 1;
+	}
+	else if (sizeof(struct blk_zone) > ZONE_INFO_SIZE) {
+		log_err("Cannot parse zone information in place if blk_zone "
+			   "structure is bigger than the raw data\n");
+		return 1;
+	}
+	// Parse the header first
+	unpack_bytes(buf, 4, !use_scsi, &num_zones);
+	num_zones = num_zones / ZONE_INFO_SIZE;
+
+
+	// Zero out the space needed by the structure
+	memset(buf, 0, sizeof(struct blk_zone_report));
+	hdr = (struct blk_zone_report*) buf;
+	hdr->nr_zones = num_zones;
+
+	num_zones = 0;
+	data_offset = HDR_SIZE;
+	struct_offset = sizeof(struct blk_zone_report);
+	while (data_offset < bufsz && num_zones < hdr->nr_zones) {
+		// If there isn't enough data for another zone, break out
+		if (bufsz - data_offset < ZONE_INFO_SIZE) {
+			break;
+		}
+		cur_zone = &buf[data_offset];
+		zone_type = cur_zone[0] & 0xF;
+		zone_cond = cur_zone[1] >> 4;
+		unpack_bytes(&cur_zone[8], 8, !use_scsi, &zone_size);
+		unpack_bytes(&cur_zone[16], 8, !use_scsi, &zone_start);
+		unpack_bytes(&cur_zone[24], 8, !use_scsi, &write_pointer);
+		// If too many zones are requested, command will zero pad
+		if (zone_size == 0) {
+			break;
+		}
+		// Convert large marker wp to start + zone_size
+		if (write_pointer > zone_start + zone_size)
+			write_pointer = zone_start + zone_size;
+		// Convert LBAs to sectors
+		zone_size *= secPerLba;
+		zone_start *= secPerLba;
+		write_pointer *= secPerLba;
+		// Zero out the space needed by the structure
+		zone_struct = (struct blk_zone*) &buf[struct_offset];
+		memset(zone_struct, 0, sizeof(struct blk_zone));
+		zone_struct->start = zone_start;
+		zone_struct->len = zone_size;
+		zone_struct->wp = write_pointer;
+		zone_struct->type = zone_type;
+		zone_struct->cond = zone_cond;
+		data_offset += ZONE_INFO_SIZE;
+		struct_offset += sizeof(struct blk_zone);
+		num_zones++;
+	}
+	// Set the header start to the first zone start
+	zone_struct = (struct blk_zone*) &buf[sizeof(struct blk_zone_report)];
+	hdr->sector = zone_struct->start;
+	// Modify header to represent the number of zones in the buffer
+	hdr->nr_zones = num_zones;
+	return 0;
+}
+
 /**
  * zbd_zone_idx - convert an offset into a zone number
  * @f: file pointer.
@@ -187,19 +635,82 @@ static bool zbd_verify_bs(void)
  *
  * Returns 0 upon success and a negative error code upon failure.
  */
-static int read_zone_info(int fd, uint64_t start_sector,
+static int read_zone_info(int fd, uint64_t start_sector, int* use_sg_rz, uint32_t* block_size,
 			  void *buf, unsigned int bufsz)
 {
 	struct blk_zone_report *hdr = buf;
+	int ret = -1;
+	uint64_t start_lba;
+	int retry;
+	bool use_scsi;
 
 	if (bufsz < sizeof(*hdr))
-		return -EINVAL;
+		return -ENOMEM;
 
+	if (*use_sg_rz <= 0) {
 	memset(hdr, 0, sizeof(*hdr));
-
 	hdr->nr_zones = (bufsz - sizeof(*hdr)) / sizeof(struct blk_zone);
 	hdr->sector = start_sector;
-	return ioctl(fd, BLKREPORTZONE, hdr) >= 0 ? 0 : -errno;
+	ret = ioctl(fd, BLKREPORTZONE, hdr) >= 0 ? 0 : -errno;
+	if (ret == 0)
+		*use_sg_rz = 0;
+	}
+
+	if (*use_sg_rz <= 0) {
+		memset(hdr, 0, sizeof(*hdr));
+		hdr->nr_zones = (bufsz - sizeof(*hdr)) / sizeof(struct blk_zone);
+		hdr->sector = start_sector;
+		for (retry = 0; retry < 10; retry++) {
+			ret = ioctl(fd, BLKREPORTZONE, hdr) >= 0 ? 0 : -errno;;
+			// Doublecheck the returned header returned a non-zero number of zones
+			if (ret == 0 && hdr->nr_zones == 0)
+				ret = -42;
+			if (ret == 0) {
+				*use_sg_rz = 0;
+				break;
+			}
+		}
+	}
+
+	// Try issuing the sg_report_zones instead
+	if (ret != 0 || *use_sg_rz != 0) {
+		if (*block_size < 512) {
+			ret = sg_read_capacity(fd, block_size);
+			if (ret != 0) {
+				log_info("failed to read capacity with return %d\n", ret);
+				*block_size = 0;
+				return ret;
+			}
+		}
+		// Round the bufsz to an even multiple of the block size
+		bufsz = (bufsz / *block_size) * (*block_size);
+		start_lba = (start_sector * 512) / (*block_size);
+		// Get whether the device is SAS or SATA
+		if (*use_sg_rz == -1) {
+			ret = sg_get_protocol(fd, &use_scsi);
+			if (ret != 0) {
+				log_info("failed to issue inquiry with return %d\n", ret);
+				return ret;
+			}
+			*use_sg_rz = use_scsi ? 2: 1;
+		} else
+			use_scsi = *use_sg_rz == 2;
+		for (retry = 0; retry < 10; retry++) {
+			ret = sg_report_zones(fd, start_lba, buf, bufsz, use_scsi);
+			if (ret != -EINVAL && ret != -EBADE) {
+				break;
+			}
+		}
+		if (ret != 0)
+			return ret;
+
+		ret = parse_to_structs(buf, bufsz, *block_size / 512, use_scsi);
+		if (ret != 0) {
+			log_info("failed to parse to structs with return %d\n", ret);
+		}
+	}
+
+	return ret;
 }
 
 /*
@@ -228,6 +739,8 @@ static enum blk_zoned_model get_zbd_model(const char *file_name)
 	char *zoned_attr_path = NULL;
 	char *model_str = NULL;
 	struct stat statbuf;
+	int fd = -1;
+	bool flex_drive;
 
 	if (stat(file_name, &statbuf) < 0)
 		goto out;
@@ -242,10 +755,20 @@ static enum blk_zoned_model get_zbd_model(const char *file_name)
 		model = ZBD_DM_HOST_AWARE;
 	else if (strcmp(model_str, "host-managed") == 0)
 		model = ZBD_DM_HOST_MANAGED;
+	else {
+		// Check whether drive is FLEX drive
+		fd = open(file_name, O_RDONLY | O_LARGEFILE);
+		if (sg_get_flex(fd, &flex_drive) != 0)
+			goto out;
+		// Treat FLEX drives like host managed
+		if (flex_drive)
+			model = ZBD_DM_HOST_MANAGED;
+	}
 
 out:
 	free(model_str);
 	free(zoned_attr_path);
+	close(fd);
 	return model;
 }
 
@@ -314,7 +837,7 @@ static int parse_zone_info(struct thread_data *td, struct fio_file *f)
 {
 	const unsigned int bufsz = sizeof(struct blk_zone_report) +
 		4096 * sizeof(struct blk_zone);
-	uint32_t nr_zones;
+	uint32_t nr_zones, block_size;
 	struct blk_zone_report *hdr;
 	const struct blk_zone *z;
 	struct fio_zone_info *p;
@@ -322,13 +845,14 @@ static int parse_zone_info(struct thread_data *td, struct fio_file *f)
 	struct zoned_block_device_info *zbd_info = NULL;
 	pthread_mutexattr_t attr;
 	void *buf;
-	int fd, i, j, ret = 0;
+	int fd, i, j, use_sg, ret = 0;
+	void* aligned_ptr;
 
 	pthread_mutexattr_init(&attr);
 	pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
 	pthread_mutexattr_setpshared(&attr, true);
 
-	buf = malloc(bufsz);
+	buf = malloc(bufsz + page_mask);
 	if (!buf)
 		goto out;
 
@@ -338,7 +862,11 @@ static int parse_zone_info(struct thread_data *td, struct fio_file *f)
 		goto free;
 	}
 
-	ret = read_zone_info(fd, 0, buf, bufsz);
+	aligned_ptr = PTR_ALIGN(buf, page_mask);
+	use_sg = -1;
+	block_size = 0;
+	memset(aligned_ptr, 0x77, 16);
+	ret = read_zone_info(fd, 0, &use_sg, &block_size, buf, bufsz);
 	if (ret < 0) {
 		log_info("fio: BLKREPORTZONE(%lu) failed for %s (%d).\n",
 			 0UL, f->file_name, -ret);
@@ -374,6 +902,8 @@ static int parse_zone_info(struct thread_data *td, struct fio_file *f)
 		goto close;
 	pthread_mutex_init(&zbd_info->mutex, &attr);
 	zbd_info->refcount = 1;
+	zbd_info->use_sg = use_sg;
+	zbd_info->block_size = block_size;
 	p = &zbd_info->zone_info[0];
 	for (start_sector = 0, j = 0; j < nr_zones;) {
 		z = (void *)(hdr + 1);
@@ -395,18 +925,32 @@ static int parse_zone_info(struct thread_data *td, struct fio_file *f)
 			}
 			p->type = z->type;
 			p->cond = z->cond;
+			// Treat full FLEX zones like conventional zones
+			if (p->type == FLEX_ZONE_TYPE && p->cond == BLK_ZONE_COND_FULL){
+				p->type = BLK_ZONE_TYPE_CONVENTIONAL;
+				p->cond = BLK_ZONE_COND_NOT_WP;
+				p->wp = p->start;
+			}
 			if (j > 0 && p->start != p[-1].start + zone_size) {
 				log_info("%s: invalid zone data\n",
 					 f->file_name);
 				ret = -EINVAL;
 				goto close;
 			}
+			if (nr_zones - j == 0) {
+				// For reasons completely opaque to me, if we exit this loop
+				// normally on the last try, the postred marker will get
+				// set to 0, causing a valid but apparently harmless
+				// warning that I'd still rather avoid -- likely
+				// to be system dependent
+				break;
+			}
 		}
 		z--;
 		start_sector = z->start + z->len;
 		if (j >= nr_zones)
 			break;
-		ret = read_zone_info(fd, start_sector, buf, bufsz);
+		ret = read_zone_info(fd, start_sector, &zbd_info->use_sg, &zbd_info->block_size, buf, bufsz);
 		if (ret < 0) {
 			log_info("fio: BLKREPORTZONE(%llu) failed for %s (%d).\n",
 				 (unsigned long long) start_sector, f->file_name, -ret);
@@ -572,12 +1116,32 @@ static int zbd_reset_range(struct thread_data *td, const struct fio_file *f,
 	switch (f->zbd_info->model) {
 	case ZBD_DM_HOST_AWARE:
 	case ZBD_DM_HOST_MANAGED:
-		ret = ioctl(f->fd, BLKRESETZONE, &zr);
-		if (ret < 0) {
-			td_verror(td, errno, "resetting wp failed");
-			log_err("%s: resetting wp for %llu sectors at sector %llu failed (%d).\n",
-				f->file_name, zr.nr_sectors, zr.sector, errno);
-			return ret;
+		if (f->zbd_info->use_sg)
+			ret = sg_reset_zones(f->fd, &zr, f->zbd_info->block_size,
+				f->zbd_info->zone_size, f->zbd_info->use_sg == 2);
+		else {
+			ret = ioctl(f->fd, BLKRESETZONE, &zr);
+			if (ret < 0) {
+				bool use_scsi;
+				int scsi_ret;
+				dprint(FD_ZBD, "%s: resetting wp with ioctl at sector %llu for %llu "
+					"sectors failed (%d), trying sg_driver instead\n",
+					f->file_name, zr.nr_sectors, zr.sector, errno);
+				scsi_ret = sg_get_protocol(f->fd, &use_scsi);
+				if (scsi_ret != 0) {
+					log_err("failed to issue inquiry with return %d\n", ret);
+					return ret;
+				}
+				f->zbd_info->use_sg = use_scsi ? 2: 1;
+				ret = sg_reset_zones(f->fd, &zr, f->zbd_info->block_size,
+					f->zbd_info->zone_size, f->zbd_info->use_sg == 2);
+				if (ret < 0) {
+					td_verror(td, errno, "resetting wp failed");
+					log_err("%s: resetting wp for %llu sectors at sector %llu failed (%d).\n",
+						f->file_name, zr.nr_sectors, zr.sector, errno);
+					return ret;
+				}
+			}
 		}
 		break;
 	case ZBD_DM_NONE:
@@ -1149,7 +1713,7 @@ bool zbd_unaligned_write(int error_code)
  */
 enum io_u_action zbd_adjust_block(struct thread_data *td, struct io_u *io_u)
 {
-	const struct fio_file *f = io_u->file;
+	struct fio_file *f = io_u->file;
 	uint32_t zone_idx_b;
 	struct fio_zone_info *zb, *zl, *orig_zb;
 	uint32_t orig_len = io_u->buflen;
@@ -1166,8 +1730,17 @@ enum io_u_action zbd_adjust_block(struct thread_data *td, struct io_u *io_u)
 	zb = &f->zbd_info->zone_info[zone_idx_b];
 	orig_zb = zb;
 
+	// dprint(FD_ZBD, "DEBUG: checking if IO zone is offline (%d). zone type, cond is %d, %d\n", BLK_ZONE_COND_OFFLINE, zb->type, zb->cond);
+	if (zb->cond == BLK_ZONE_COND_OFFLINE) {
+		// Allow sequential jobs to skip this zone
+		if (zb->wp == 0)
+			f->last_pos[io_u->ddir] = f->file_offset;
+		else
+			f->last_pos[io_u->ddir] = zb->wp;
+		return io_u_retry;
+	}
 	/* Accept the I/O offset for conventional zones. */
-	if (zb->type == BLK_ZONE_TYPE_CONVENTIONAL)
+	else if (zb->type == BLK_ZONE_TYPE_CONVENTIONAL)
 		return io_u_accept;
 
 	/*
@@ -1250,6 +1823,14 @@ enum io_u_action zbd_adjust_block(struct thread_data *td, struct io_u *io_u)
 			if (!zb)
 				goto eof;
 			zone_idx_b = zb - f->zbd_info->zone_info;
+		}
+		/* If this is a filled FLEX zone, treat it like a conventional
+		 * from now on
+		 */
+		if (zb->type == FLEX_ZONE_TYPE && zb->wp >= zb->start + f->zbd_info->zone_size) {
+			zb->type = BLK_ZONE_TYPE_CONVENTIONAL;
+			zb->wp = zb->start;
+			goto accept;
 		}
 		/* Check whether the zone reset threshold has been exceeded */
 		if (td->o.zrf.u.f) {

@@ -13,6 +13,8 @@
 #include <linux/blkzoned.h>
 #endif
 
+#define FLEX_ZONE_TYPE 4
+
 struct fio_file;
 
 /*
@@ -27,6 +29,7 @@ enum blk_zoned_model {
 enum io_u_action {
 	io_u_accept	= 0,
 	io_u_eof	= 1,
+	io_u_retry	= 2,
 };
 
 /**
@@ -47,8 +50,8 @@ struct fio_zone_info {
 	uint64_t		start;
 	uint64_t		wp;
 	uint32_t		verify_block;
-	enum blk_zone_type	type:2;
-	enum blk_zone_cond	cond:4;
+	uint8_t 		type;
+	uint8_t 		cond:4;
 	unsigned int		open:1;
 	unsigned int		reset_zone:1;
 #endif
@@ -84,6 +87,8 @@ struct zoned_block_device_info {
 	uint32_t		nr_zones;
 	uint32_t		refcount;
 	uint32_t		num_open_zones;
+	int		use_sg;
+	uint32_t		block_size;
 	uint32_t		write_cnt;
 	uint32_t		open_zones[FIO_MAX_OPEN_ZBD_ZONES];
 	struct fio_zone_info	zone_info[0];
