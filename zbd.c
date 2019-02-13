@@ -304,7 +304,7 @@ static int sg_report_zones(int fd, uint64_t start_lba, void *buf,
  * @zr: start and number of zones to reset
  * @block_size: logical block size of device in bytes -- used to convert
  *				sectors from zr into LBAs
- * @zone_size: sectors per zone
+ * @zone_size: bytes per zone
  * @use_scsi: whether to use the SCSI or the ATA command
  */
 static int sg_reset_zones(int fd, struct blk_zone_range* zr, uint32_t block_size,
@@ -315,7 +315,7 @@ static int sg_reset_zones(int fd, struct blk_zone_range* zr, uint32_t block_size
 	uint64_t cur_lba, last_lba;
 	int ret = 0;
 
-	zone_size = zone_size / sec_per_lba;
+	zone_size = zone_size / block_size;
 	cur_lba = zr->sector / sec_per_lba;
 	last_lba = cur_lba + (zr->nr_sectors / sec_per_lba);
 
@@ -1117,8 +1117,10 @@ static int zbd_reset_range(struct thread_data *td, const struct fio_file *f,
 	case ZBD_DM_HOST_AWARE:
 	case ZBD_DM_HOST_MANAGED:
 		if (f->zbd_info->use_sg)
+		{
 			ret = sg_reset_zones(f->fd, &zr, f->zbd_info->block_size,
 				f->zbd_info->zone_size, f->zbd_info->use_sg == 2);
+		}
 		else {
 			ret = ioctl(f->fd, BLKRESETZONE, &zr);
 			if (ret < 0) {
@@ -1213,6 +1215,7 @@ static int zbd_reset_zones(struct thread_data *td, struct fio_file *f,
 	assert(f->fd != -1);
 	for (z = zb; z < ze; z++) {
 		pthread_mutex_lock(&z->mutex);
+
 		switch (z->type) {
 		case BLK_ZONE_TYPE_SEQWRITE_REQ:
 			reset_wp = all_zones ? z->wp != z->start :
@@ -1730,7 +1733,6 @@ enum io_u_action zbd_adjust_block(struct thread_data *td, struct io_u *io_u)
 	zb = &f->zbd_info->zone_info[zone_idx_b];
 	orig_zb = zb;
 
-	// dprint(FD_ZBD, "DEBUG: checking if IO zone is offline (%d). zone type, cond is %d, %d\n", BLK_ZONE_COND_OFFLINE, zb->type, zb->cond);
 	if (zb->cond == BLK_ZONE_COND_OFFLINE) {
 		// Allow sequential jobs to skip this zone
 		if (zb->wp == 0)
