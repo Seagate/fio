@@ -648,15 +648,6 @@ static int read_zone_info(int fd, uint64_t start_sector, int* use_sg_rz, uint32_
 		return -ENOMEM;
 
 	if (*use_sg_rz <= 0) {
-	memset(hdr, 0, sizeof(*hdr));
-	hdr->nr_zones = (bufsz - sizeof(*hdr)) / sizeof(struct blk_zone);
-	hdr->sector = start_sector;
-	ret = ioctl(fd, BLKREPORTZONE, hdr) >= 0 ? 0 : -errno;
-	if (ret == 0)
-		*use_sg_rz = 0;
-	}
-
-	if (*use_sg_rz <= 0) {
 		memset(hdr, 0, sizeof(*hdr));
 		hdr->nr_zones = (bufsz - sizeof(*hdr)) / sizeof(struct blk_zone);
 		hdr->sector = start_sector;
@@ -1871,7 +1862,7 @@ enum io_u_action zbd_adjust_block(struct thread_data *td, struct io_u *io_u)
 		 * small.
 		 */
 		new_len = min((unsigned long long)io_u->buflen,
-			      (zb + 1)->start - io_u->offset);
+			      zb->start + f->zbd_info->zone_size - io_u->offset);
 		new_len = new_len / min_bs * min_bs;
 		if (new_len == io_u->buflen)
 			goto accept;
@@ -1882,7 +1873,7 @@ enum io_u_action zbd_adjust_block(struct thread_data *td, struct io_u *io_u)
 			goto accept;
 		}
 		log_err("Zone remainder %lld smaller than minimum block size %d\n",
-			((zb + 1)->start - io_u->offset),
+			(zb->start + f->zbd_info->zone_size - io_u->offset),
 			min_bs);
 		goto eof;
 	case DDIR_TRIM:
