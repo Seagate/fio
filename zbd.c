@@ -500,7 +500,7 @@ static bool zbd_zone_full(const struct fio_file *f, struct fio_zone_info *z,
 {
 	assert((required & 511) == 0);
 
-	return z->type == BLK_ZONE_TYPE_SEQWRITE_REQ &&
+	return (z->type == BLK_ZONE_TYPE_SEQWRITE_REQ || z->type == FLEX_ZONE_TYPE) &&
 		z->wp + required > z->start + f->zbd_info->zone_size;
 }
 
