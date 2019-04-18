@@ -902,9 +902,9 @@ static int parse_zone_info(struct thread_data *td, struct fio_file *f)
 			pthread_mutex_init(&p->mutex, &attr);
 			p->start = z->start << 9;
 			switch (z->cond) {
+			// Set conventional zones wp to full so that the random read search algorithm can select
+			// conventional zones if necessary
 			case BLK_ZONE_COND_NOT_WP:
-				p->wp = p->start;
-				break;
 			case BLK_ZONE_COND_FULL:
 				p->wp = p->start + zone_size;
 				break;
@@ -1623,13 +1623,14 @@ zbd_find_zone(struct thread_data *td, struct io_u *io_u,
 		if (td_random(td) && z2 >= zf &&
 		    z2->cond != BLK_ZONE_COND_OFFLINE) {
 			pthread_mutex_lock(&z2->mutex);
-			if (z2->start + min_bs <= z2->wp)
+			if (z2->start + min_bs <= z2->wp || z2->type == BLK_ZONE_TYPE_CONVENTIONAL)
 				return z2;
 			pthread_mutex_unlock(&z2->mutex);
 		}
 	}
 	dprint(FD_ZBD, "%s: adjusting random read offset failed\n",
 	       f->file_name);
+
 	return NULL;
 }
 
