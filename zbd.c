@@ -1623,7 +1623,7 @@ zbd_find_zone(struct thread_data *td, struct io_u *io_u,
 		if (td_random(td) && z2 >= zf &&
 		    z2->cond != BLK_ZONE_COND_OFFLINE) {
 			pthread_mutex_lock(&z2->mutex);
-			if (z2->start + min_bs <= z2->wp || z2->type == BLK_ZONE_TYPE_CONVENTIONAL)
+			if (z2->start + min_bs <= z2->wp)
 				return z2;
 			pthread_mutex_unlock(&z2->mutex);
 		}
