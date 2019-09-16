@@ -1777,7 +1777,9 @@ err_put:
 static void __io_u_log_error(struct thread_data *td, struct io_u *io_u)
 {
 	enum error_type_bit eb = td_error_type(io_u->ddir, io_u->error);
+	#ifdef CONFIG_LINUX_BLKZONED
 	struct zoned_block_device_info *zbd_info = io_u->file->zbd_info;
+	#endif
 
 	if (td_non_fatal_error(td, eb, io_u->error) && !td->o.error_dump)
 		return;
@@ -1788,6 +1790,7 @@ static void __io_u_log_error(struct thread_data *td, struct io_u *io_u)
 		strerror(io_u->error),
 		io_ddir_name(io_u->ddir),
 		io_u->offset, io_u->xfer_buflen);
+	#ifdef CONFIG_LINUX_BLKZONED
 	if (zbd_info != NULL) {
 		uint64_t zone_ind;
 		struct fio_zone_info* zone_info;
@@ -1806,6 +1809,7 @@ static void __io_u_log_error(struct thread_data *td, struct io_u *io_u)
 	} else if (td->o.zone_mode == ZONE_MODE_ZBD) {
 		log_err("fio: No zone information available even with zonemode=zbd\n");
 	}
+	#endif
 
 	if (td->io_ops->errdetails) {
 		char *err = td->io_ops->errdetails(io_u);

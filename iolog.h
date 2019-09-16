@@ -144,7 +144,7 @@ struct io_log {
 /*
  * If the upper bit is set, then we have the offset as well
  */
-#define LOG_OFFSET_SAMPLE_BIT	0x80000000U
+#define LOG_OFFSET_SAMPLE_BIT	0x40000000U
 #define io_sample_ddir(io)	((io)->__ddir & ~LOG_OFFSET_SAMPLE_BIT)
 
 static inline void io_sample_set_ddir(struct io_log *log,
