@@ -10,7 +10,11 @@
 #include <inttypes.h>
 #include "fio.h"	/* FIO_MAX_OPEN_ZBD_ZONES */
 #ifdef CONFIG_LINUX_BLKZONED
-#include <linux/blkzoned.h>
+	#include <linux/blkzoned.h>
+	// A zone condition that should be defined in blkzoned.h, but isn't currently
+	#ifndef BLK_ZONE_COND_INACTIVE
+		#define BLK_ZONE_COND_INACTIVE 5
+	#endif
 #endif
 
 #define FLEX_ZONE_TYPE 4
@@ -101,6 +105,8 @@ void zbd_file_reset(struct thread_data *td, struct fio_file *f);
 bool zbd_unaligned_write(int error_code);
 enum io_u_action zbd_adjust_block(struct thread_data *td, struct io_u *io_u);
 char *zbd_write_status(const struct thread_stat *ts);
+#define active_zone(zone)	((zone)->cond != BLK_ZONE_COND_OFFLINE &&\
+                             (zone)->cond != BLK_ZONE_COND_INACTIVE)
 #else
 static inline void zbd_free_zone_info(struct fio_file *f)
 {

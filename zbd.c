@@ -1396,7 +1396,7 @@ static bool zbd_open_zone(struct thread_data *td, const struct io_u *io_u,
 	struct fio_zone_info *z = &f->zbd_info->zone_info[zone_idx];
 	bool res = true;
 
-	if (z->cond == BLK_ZONE_COND_OFFLINE)
+	if (!active_zone(z))
 		return false;
 
 	/*
@@ -1612,7 +1612,7 @@ zbd_find_zone(struct thread_data *td, struct io_u *io_u,
 	 * the nearest non-empty zone in case of random I/O.
 	 */
 	for (z1 = zb + 1, z2 = zb - 1; z1 < zl || z2 >= zf; z1++, z2--) {
-		if (z1 < zl && z1->cond != BLK_ZONE_COND_OFFLINE) {
+		if (z1 < zl && active_zone(z1)) {
 			pthread_mutex_lock(&z1->mutex);
 			if (z1->start + min_bs <= z1->wp)
 				return z1;
@@ -1620,8 +1620,7 @@ zbd_find_zone(struct thread_data *td, struct io_u *io_u,
 		} else if (!td_random(td)) {
 			break;
 		}
-		if (td_random(td) && z2 >= zf &&
-		    z2->cond != BLK_ZONE_COND_OFFLINE) {
+		if (td_random(td) && z2 >= zf && active_zone(z2)) {
 			pthread_mutex_lock(&z2->mutex);
 			if (z2->start + min_bs <= z2->wp)
 				return z2;
@@ -1725,7 +1724,7 @@ enum io_u_action zbd_adjust_block(struct thread_data *td, struct io_u *io_u)
 	zb = &f->zbd_info->zone_info[zone_idx_b];
 	orig_zb = zb;
 
-	if (zb->cond == BLK_ZONE_COND_OFFLINE) {
+	if (!active_zone(zb)) {
 		// Allow sequential jobs to skip this zone
 		if (zb->wp == 0)
 			f->last_pos[io_u->ddir] = f->file_offset;
@@ -1741,8 +1740,7 @@ enum io_u_action zbd_adjust_block(struct thread_data *td, struct io_u *io_u)
 	 * Accept the I/O offset for reads if reading beyond the write pointer
 	 * is enabled.
 	 */
-	if (zb->cond != BLK_ZONE_COND_OFFLINE &&
-	    io_u->ddir == DDIR_READ && td->o.read_beyond_wp)
+	if (active_zone(zb) && io_u->ddir == DDIR_READ && td->o.read_beyond_wp)
 		return io_u_accept;
 
 	zbd_check_swd(f);
@@ -1759,7 +1757,7 @@ enum io_u_action zbd_adjust_block(struct thread_data *td, struct io_u *io_u)
 		 * I/O of at least min_bs B. If there isn't, find a new zone for
 		 * the I/O.
 		 */
-		range = zb->cond != BLK_ZONE_COND_OFFLINE ?
+		range = active_zone(zb) ?
 			zb->wp - zb->start : 0;
 		if (range < min_bs ||
 		    ((!td_random(td)) && (io_u->offset + min_bs > zb->wp))) {
@@ -1892,7 +1890,7 @@ enum io_u_action zbd_adjust_block(struct thread_data *td, struct io_u *io_u)
 
 accept:
 	assert(zb);
-	assert(zb->cond != BLK_ZONE_COND_OFFLINE);
+	assert(active_zone(zb));
 	assert(!io_u->post_submit);
 	io_u->post_submit = zbd_post_submit;
 	return io_u_accept;
