@@ -296,9 +296,11 @@ static int _curl_trace(CURL *handle, curl_infotype type,
 
 	switch (type) {
 	case CURLINFO_TEXT:
-	fprintf(stderr, "== Info: %s", data);
+		fprintf(stderr, "== Info: %s", data);
+		/* fall through */
 	default:
 	case CURLINFO_SSL_DATA_OUT:
+		/* fall through */
 	case CURLINFO_SSL_DATA_IN:
 		return 0;
 
@@ -640,7 +642,7 @@ static int fio_http_invalidate(struct thread_data *td, struct fio_file *f)
 static struct ioengine_ops ioengine = {
 	.name = "http",
 	.version		= FIO_IOOPS_VERSION,
-	.flags			= FIO_DISKLESSIO,
+	.flags			= FIO_DISKLESSIO | FIO_SYNCIO,
 	.setup			= fio_http_setup,
 	.queue			= fio_http_queue,
 	.getevents		= fio_http_getevents,

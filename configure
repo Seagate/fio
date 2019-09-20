@@ -148,6 +148,7 @@ disable_lex=""
 disable_pmem="no"
 disable_native="no"
 march_set="no"
+libiscsi="no"
 prefix=/usr/local
 
 # parse options
@@ -204,6 +205,10 @@ for opt do
   ;;
   --with-ime=*) ime_path="$optarg"
   ;;
+  --enable-libiscsi) libiscsi="yes"
+  ;;
+  --disable-tcmalloc) disable_tcmalloc="yes"
+  ;;
   --help)
     show_help="yes"
     ;;
@@ -239,6 +244,8 @@ if test "$show_help" = "yes" ; then
   echo "--enable-cuda           Enable GPUDirect RDMA support"
   echo "--disable-native        Don't build for native host"
   echo "--with-ime=             Install path for DDN's Infinite Memory Engine"
+  echo "--enable-libiscsi       Enable iscsi support"
+  echo "--disable-tcmalloc	Disable tcmalloc support"
   exit $exit_val
 fi
 
@@ -302,6 +309,10 @@ AIX|OpenBSD|NetBSD)
   else
     force_no_lex_o="yes"
   fi
+  ;;
+FreeBSD)
+  CFLAGS="$CFLAGS -I/usr/local/include"
+  LDFLAGS="$LDFLAGS -L/usr/local/lib"
   ;;
 Darwin)
   # on Leopard most of the system is 32-bit, so we have to ask the kernel if
@@ -1336,31 +1347,30 @@ int main(void)
   return GTK_CHECK_VERSION(2, 18, 0) ? 0 : 1; /* 0 on success */
 }
 EOF
-GTK_CFLAGS=$(pkg-config --cflags gtk+-2.0 gthread-2.0)
+GTK_CFLAGS=$(${cross_prefix}pkg-config --cflags gtk+-2.0 gthread-2.0)
 ORG_LDFLAGS=$LDFLAGS
 LDFLAGS=$(echo $LDFLAGS | sed s/"-static"//g)
 if test "$?" != "0" ; then
   echo "configure: gtk and gthread not found"
   exit 1
 fi
-GTK_LIBS=$(pkg-config --libs gtk+-2.0 gthread-2.0)
+GTK_LIBS=$(${cross_prefix}pkg-config --libs gtk+-2.0 gthread-2.0)
 if test "$?" != "0" ; then
   echo "configure: gtk and gthread not found"
   exit 1
 fi
-if compile_prog "$GTK_CFLAGS" "$GTK_LIBS" "gfio" ; then
-  $TMPE
-  if test "$?" = "0" ; then
+if ! ${cross_prefix}pkg-config --atleast-version 2.18.0 gtk+-2.0; then
+  echo "GTK found, but need version 2.18 or higher"
+  gfio="no"
+else
+  if compile_prog "$GTK_CFLAGS" "$GTK_LIBS" "gfio" ; then
     gfio="yes"
     GFIO_LIBS="$LIBS $GTK_LIBS"
     CFLAGS="$CFLAGS $GTK_CFLAGS"
   else
-    echo "GTK found, but need version 2.18 or higher"
+    echo "Please install gtk and gdk libraries"
     gfio="no"
   fi
-else
-  echo "Please install gtk and gdk libraries"
-  gfio="no"
 fi
 LDFLAGS=$ORG_LDFLAGS
 fi
@@ -1782,6 +1792,24 @@ print_config "Gluster API use fadvise" "$gf_fadvise"
 fi
 
 ##########################################
+# check for newer gfapi
+if test "$gfapi" = "yes" ; then
+gf_new="no"
+cat > $TMPC << EOF
+#include <glusterfs/api/glfs.h>
+
+int main(int argc, char **argv)
+{
+  return glfs_fsync(NULL, NULL, NULL) && glfs_ftruncate(NULL, 0, NULL, NULL);
+}
+EOF
+if compile_prog "" "-lgfapi -lglusterfs" "gf new api"; then
+  gf_new="yes"
+fi
+print_config "Gluster new API" "$gf_new"
+fi
+
+##########################################
 # check for gfapi trim support
 if test "$gf_trim" != "yes" ; then
   gf_trim="no"
@@ -1969,6 +1997,22 @@ if compile_prog "-I${ime_path}/include" "-L${ime_path}/lib -lim_client" "libime"
   LIBS="-lim_client $LIBS"
 fi
 print_config "DDN's Infinite Memory Engine" "$libime"
+
+##########################################
+# Check if we have required environment variables configured for libiscsi
+if test "$libiscsi" = "yes" ; then
+  if $(pkg-config --atleast-version=1.9.0 libiscsi); then
+    libiscsi="yes"
+    libiscsi_cflags=$(pkg-config --cflags libiscsi)
+    libiscsi_libs=$(pkg-config --libs libiscsi)
+  else
+    if test "$libiscsi" = "yes" ; then
+      echo "libiscsi" "Install libiscsi >= 1.9.0"
+    fi
+    libiscsi="no"
+  fi
+fi
+print_config "iscsi engine" "$libiscsi"
 
 ##########################################
 # Check if we have lex/yacc available
@@ -2272,6 +2316,99 @@ if test "$disable_native" = "no" && test "$disable_opt" != "yes" && \
 fi
 print_config "Build march=native" "$build_native"
 
+##########################################
+# check for -lcunit
+if test "$cunit" != "yes" ; then
+  cunit="no"
+fi
+cat > $TMPC << EOF
+#include <CUnit/CUnit.h>
+#include <CUnit/Basic.h>
+int main(void)
+{
+  if (CU_initialize_registry() != CUE_SUCCESS)
+    return CU_get_error();
+  CU_basic_set_mode(CU_BRM_VERBOSE);
+  CU_basic_run_tests();
+  CU_cleanup_registry();
+  return CU_get_error();
+}
+EOF
+if compile_prog "" "-lcunit" "CUnit"; then
+  cunit="yes"
+fi
+print_config "CUnit" "$cunit"
+
+##########################################
+# check for __kernel_rwf_t
+__kernel_rwf_t="no"
+cat > $TMPC << EOF
+#include <linux/fs.h>
+int main(int argc, char **argv)
+{
+  __kernel_rwf_t x;
+  x = 0;
+  return x;
+}
+EOF
+if compile_prog "" "" "__kernel_rwf_t"; then
+  __kernel_rwf_t="yes"
+fi
+print_config "__kernel_rwf_t" "$__kernel_rwf_t"
+
+##########################################
+# check if gcc has -Wimplicit-fallthrough
+fallthrough="no"
+cat > $TMPC << EOF
+int main(int argc, char **argv)
+{
+  return 0;
+}
+EOF
+if compile_prog "-Wimplicit-fallthrough" "" "-Wimplicit-fallthrough"; then
+  fallthrough="yes"
+fi
+print_config "-Wimplicit-fallthrough" "$fallthrough"
+
+##########################################
+# check for MADV_HUGEPAGE support
+if test "$thp" != "yes" ; then
+  thp="no"
+fi
+if test "$esx" != "yes" ; then
+  cat > $TMPC <<EOF
+#include <sys/mman.h>
+int main(void)
+{
+  return madvise(0, 0x1000, MADV_HUGEPAGE);
+}
+EOF
+  if compile_prog "" "" "thp" ; then
+    thp=yes
+  else
+    if test "$thp" = "yes" ; then
+      feature_not_found "Transparent Huge Page" ""
+    fi
+    thp=no
+  fi
+fi
+print_config "MADV_HUGEPAGE" "$thp"
+
+##########################################
+# check for gettid()
+gettid="no"
+cat > $TMPC << EOF
+#include <unistd.h>
+int main(int argc, char **argv)
+{
+  return gettid();
+}
+EOF
+if compile_prog "" "" "gettid"; then
+  gettid="yes"
+fi
+print_config "gettid" "$gettid"
+
 #############################################################################
 
 if test "$wordsize" = "64" ; then
@@ -2459,13 +2596,16 @@ fi
 if test "$gf_trim" = "yes" ; then
   output_sym "CONFIG_GF_TRIM"
 fi
+if test "$gf_new" = "yes" ; then
+  output_sym "CONFIG_GF_NEW_API"
+fi
 if test "$libhdfs" = "yes" ; then
   output_sym "CONFIG_LIBHDFS"
   echo "FIO_HDFS_CPU=$FIO_HDFS_CPU" >> $config_host_mak
   echo "JAVA_HOME=$JAVA_HOME" >> $config_host_mak
   echo "FIO_LIBHDFS_INCLUDE=$FIO_LIBHDFS_INCLUDE" >> $config_host_mak
   echo "FIO_LIBHDFS_LIB=$FIO_LIBHDFS_LIB" >> $config_host_mak
- fi
+fi
 if test "$mtd" = "yes" ; then
   output_sym "CONFIG_MTD"
 fi
@@ -2537,6 +2677,40 @@ fi
 if test "$march_set" = "no" && test "$build_native" = "yes" ; then
   output_sym "CONFIG_BUILD_NATIVE"
 fi
+if test "$cunit" = "yes" ; then
+  output_sym "CONFIG_HAVE_CUNIT"
+fi
+if test "$__kernel_rwf_t" = "yes"; then
+  output_sym "CONFIG_HAVE_KERNEL_RWF_T"
+fi
+if test "$gettid" = "yes"; then
+  output_sym "CONFIG_HAVE_GETTID"
+fi
+if test "$fallthrough" = "yes"; then
+  CFLAGS="$CFLAGS -Wimplicit-fallthrough"
+fi
+if test "$thp" = "yes" ; then
+  output_sym "CONFIG_HAVE_THP"
+fi
+if test "$libiscsi" = "yes" ; then
+  output_sym "CONFIG_LIBISCSI"
+  echo "CONFIG_LIBISCSI=m" >> $config_host_mak
+  echo "LIBISCSI_CFLAGS=$libiscsi_cflags" >> $config_host_mak
+  echo "LIBISCSI_LIBS=$libiscsi_libs" >> $config_host_mak
+fi
+cat > $TMPC << EOF
+int main(int argc, char **argv)
+{
+  return 0;
+}
+EOF
+if test "$disable_tcmalloc" != "yes"  && compile_prog "" "-ltcmalloc" "tcmalloc"; then
+  LIBS="-ltcmalloc $LIBS"
+  tcmalloc="yes"
+else
+  tcmalloc="no"
+fi
+print_config "TCMalloc support" "$tcmalloc"
 
 echo "LIBS+=$LIBS" >> $config_host_mak
 echo "GFIO_LIBS+=$GFIO_LIBS" >> $config_host_mak

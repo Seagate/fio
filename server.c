@@ -1470,9 +1470,12 @@ void fio_server_send_ts(struct thread_stat *ts, struct group_run_stats *rs)
 
 	memset(&p, 0, sizeof(p));
 
-	strncpy(p.ts.name, ts->name, FIO_JOBNAME_SIZE - 1);
-	strncpy(p.ts.verror, ts->verror, FIO_VERROR_SIZE - 1);
-	strncpy(p.ts.description, ts->description, FIO_JOBDESC_SIZE - 1);
+	strncpy(p.ts.name, ts->name, FIO_JOBNAME_SIZE);
+	p.ts.name[FIO_JOBNAME_SIZE - 1] = '\0';
+	strncpy(p.ts.verror, ts->verror, FIO_VERROR_SIZE);
+	p.ts.verror[FIO_VERROR_SIZE - 1] = '\0';
+	strncpy(p.ts.description, ts->description, FIO_JOBDESC_SIZE);
+	p.ts.description[FIO_JOBDESC_SIZE - 1] = '\0';
 
 	p.ts.error		= cpu_to_le32(ts->error);
 	p.ts.thread_number	= cpu_to_le32(ts->thread_number);
@@ -1530,6 +1533,7 @@ void fio_server_send_ts(struct thread_stat *ts, struct group_run_stats *rs)
 
 	p.ts.total_submit	= cpu_to_le64(ts->total_submit);
 	p.ts.total_complete	= cpu_to_le64(ts->total_complete);
+	p.ts.nr_zone_resets	= cpu_to_le64(ts->nr_zone_resets);
 
 	for (i = 0; i < DDIR_RWDIR_CNT; i++) {
 		p.ts.io_bytes[i]	= cpu_to_le64(ts->io_bytes[i]);
@@ -1562,6 +1566,7 @@ void fio_server_send_ts(struct thread_stat *ts, struct group_run_stats *rs)
 	p.ts.ss_deviation.u.i	= cpu_to_le64(fio_double_to_uint64(ts->ss_deviation.u.f));
 	p.ts.ss_criterion.u.i	= cpu_to_le64(fio_double_to_uint64(ts->ss_criterion.u.f));
 
+
 	p.ts.priority_bit = ts->priority_bit;
 	for (i = 0; i < FIO_IO_U_PLAT_NR; i++) {
 		p.ts.io_u_plat_high_prio[i] = cpu_to_le64(ts->io_u_plat_high_prio[i]);
@@ -1569,6 +1574,10 @@ void fio_server_send_ts(struct thread_stat *ts, struct group_run_stats *rs)
 	}
 	convert_io_stat(&p.ts.clat_high_prio_stat, &ts->clat_high_prio_stat);
 	convert_io_stat(&p.ts.clat_prio_stat, &ts->clat_prio_stat);
+
+	p.ts.cachehit		= cpu_to_le64(ts->cachehit);
+	p.ts.cachemiss		= cpu_to_le64(ts->cachemiss);
+
 
 	convert_gs(&p.rs, rs);
 

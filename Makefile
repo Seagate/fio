@@ -59,6 +59,12 @@ ifdef CONFIG_LIBHDFS
   SOURCE += engines/libhdfs.c
 endif
 
+ifdef CONFIG_LIBISCSI
+  CFLAGS += $(LIBISCSI_CFLAGS)
+  LIBS += $(LIBISCSI_LIBS)
+  SOURCE += engines/libiscsi.c
+endif
+
 ifdef CONFIG_64BIT
   CFLAGS += -DBITS_PER_LONG=64
 endif
@@ -151,7 +157,7 @@ endif
 
 ifeq ($(CONFIG_TARGET_OS), Linux)
   SOURCE += diskutil.c fifo.c blktrace.c cgroup.c trim.c engines/sg.c \
-		oslib/linux-dev-lookup.c
+		oslib/linux-dev-lookup.c engines/io_uring.c
   LIBS += -lpthread -ldl
   LDFLAGS += -rdynamic
 endif
@@ -263,6 +269,9 @@ T_VS_PROGS = t/fio-verify-state
 T_PIPE_ASYNC_OBJS = t/read-to-pipe-async.o
 T_PIPE_ASYNC_PROGS = t/read-to-pipe-async
 
+T_IOU_RING_OBJS = t/io_uring.o
+T_IOU_RING_PROGS = t/io_uring
+
 T_MEMLOCK_OBJS = t/memlock.o
 T_MEMLOCK_PROGS = t/memlock
 
@@ -281,6 +290,7 @@ T_OBJS += $(T_VS_OBJS)
 T_OBJS += $(T_PIPE_ASYNC_OBJS)
 T_OBJS += $(T_MEMLOCK_OBJS)
 T_OBJS += $(T_TT_OBJS)
+T_OBJS += $(T_IOU_RING_OBJS)
 
 ifneq (,$(findstring CYGWIN,$(CONFIG_TARGET_OS)))
     T_DEDUPE_OBJS += os/windows/posix.o lib/hweight.o
@@ -299,6 +309,23 @@ T_PROGS += $(T_DEDUPE_PROGS)
 T_PROGS += $(T_VS_PROGS)
 
 PROGS += $(T_PROGS)
+
+ifdef CONFIG_HAVE_CUNIT
+UT_OBJS = unittests/unittest.o
+UT_OBJS += unittests/lib/memalign.o
+UT_OBJS += unittests/lib/strntol.o
+UT_OBJS += unittests/oslib/strlcat.o
+UT_OBJS += unittests/oslib/strndup.o
+UT_TARGET_OBJS = lib/memalign.o
+UT_TARGET_OBJS += lib/strntol.o
+UT_TARGET_OBJS += oslib/strlcat.o
+UT_TARGET_OBJS += oslib/strndup.o
+UT_PROGS = unittests/unittest
+else
+UT_OBJS =
+UT_TARGET_OBJS =
+UT_PROGS =
+endif
 
 ifneq ($(findstring $(MAKEFLAGS),s),s)
 ifndef V
@@ -326,7 +353,7 @@ mandir = $(prefix)/man
 sharedir = $(prefix)/share/fio
 endif
 
-all: $(PROGS) $(T_TEST_PROGS) $(SCRIPTS) FORCE
+all: $(PROGS) $(T_TEST_PROGS) $(UT_PROGS) $(SCRIPTS) FORCE
 
 .PHONY: all install clean test
 .PHONY: FORCE cscope
@@ -423,6 +450,10 @@ cairo_text_helpers.o: cairo_text_helpers.c cairo_text_helpers.h
 printing.o: printing.c printing.h
 	$(QUIET_CC)$(CC) $(CFLAGS) $(GTK_CFLAGS) $(CPPFLAGS) -c $<
 
+t/io_uring.o: os/linux/io_uring.h
+t/io_uring: $(T_IOU_RING_OBJS)
+	$(QUIET_LINK)$(CC) $(LDFLAGS) $(CFLAGS) -o $@ $(T_IOU_RING_OBJS) $(LIBS)
+
 t/read-to-pipe-async: $(T_PIPE_ASYNC_OBJS)
 	$(QUIET_LINK)$(CC) $(LDFLAGS) $(CFLAGS) -o $@ $(T_PIPE_ASYNC_OBJS) $(LIBS)
 
@@ -467,8 +498,13 @@ t/fio-verify-state: $(T_VS_OBJS)
 t/time-test: $(T_TT_OBJS)
 	$(QUIET_LINK)$(CC) $(LDFLAGS) $(CFLAGS) -o $@ $(T_TT_OBJS) $(LIBS)
 
+ifdef CONFIG_HAVE_CUNIT
+unittests/unittest: $(UT_OBJS) $(UT_TARGET_OBJS)
+	$(QUIET_LINK)$(CC) $(LDFLAGS) $(CFLAGS) -o $@ $(UT_OBJS) $(UT_TARGET_OBJS) -lcunit
+endif
+
 clean: FORCE
-	@rm -f .depend $(FIO_OBJS) $(GFIO_OBJS) $(OBJS) $(T_OBJS) $(PROGS) $(T_PROGS) $(T_TEST_PROGS) core.* core gfio FIO-VERSION-FILE *.[do] lib/*.d oslib/*.[do] crc/*.d engines/*.[do] profiles/*.[do] t/*.[do] config-host.mak config-host.h y.tab.[ch] lex.yy.c exp/*.[do] lexer.h
+	@rm -f .depend $(FIO_OBJS) $(GFIO_OBJS) $(OBJS) $(T_OBJS) $(UT_OBJS) $(PROGS) $(T_PROGS) $(T_TEST_PROGS) core.* core gfio unittests/unittest FIO-VERSION-FILE *.[do] lib/*.d oslib/*.[do] crc/*.d engines/*.[do] profiles/*.[do] t/*.[do] unittests/*.[do] unittests/*/*.[do] config-host.mak config-host.h y.tab.[ch] lex.yy.c exp/*.[do] lexer.h
 	@rm -rf  doc/output
 
 distclean: clean FORCE

@@ -29,6 +29,7 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <math.h>
+#include <pthread.h>
 
 #include "fio.h"
 #include "smalloc.h"
@@ -65,6 +66,7 @@ unsigned int stat_number = 0;
 int shm_id = 0;
 int temp_stall_ts;
 unsigned long done_secs = 0;
+pthread_mutex_t overlap_check = PTHREAD_MUTEX_INITIALIZER;
 
 #define JOB_START_TIMEOUT	(5 * 1000)
 
@@ -234,6 +236,9 @@ static bool check_min_rate(struct thread_data *td, struct timespec *now)
 static void cleanup_pending_aio(struct thread_data *td)
 {
 	int r;
+
+	if (td->error)
+		return;
 
 	/*
 	 * get immediately available events, if any
@@ -567,7 +572,7 @@ static int unlink_all_files(struct thread_data *td)
 /*
  * Check if io_u will overlap an in-flight IO in the queue
  */
-static bool in_flight_overlap(struct io_u_queue *q, struct io_u *io_u)
+bool in_flight_overlap(struct io_u_queue *q, struct io_u *io_u)
 {
 	bool overlap;
 	struct io_u *check_io_u;
@@ -1187,14 +1192,14 @@ static void cleanup_io_u(struct thread_data *td)
 		if (td->io_ops->io_u_free)
 			td->io_ops->io_u_free(td, io_u);
 
-		fio_memfree(io_u, sizeof(*io_u));
+		fio_memfree(io_u, sizeof(*io_u), td_offload_overlap(td));
 	}
 
 	free_io_mem(td);
 
 	io_u_rexit(&td->io_u_requeues);
-	io_u_qexit(&td->io_u_freelist);
-	io_u_qexit(&td->io_u_all);
+	io_u_qexit(&td->io_u_freelist, false);
+	io_u_qexit(&td->io_u_all, td_offload_overlap(td));
 
 	free_file_completion_logging(td);
 }
@@ -1209,8 +1214,8 @@ static int init_io_u(struct thread_data *td)
 
 	err = 0;
 	err += !io_u_rinit(&td->io_u_requeues, td->o.iodepth);
-	err += !io_u_qinit(&td->io_u_freelist, td->o.iodepth);
-	err += !io_u_qinit(&td->io_u_all, td->o.iodepth);
+	err += !io_u_qinit(&td->io_u_freelist, td->o.iodepth, false);
+	err += !io_u_qinit(&td->io_u_all, td->o.iodepth, td_offload_overlap(td));
 
 	if (err) {
 		log_err("fio: failed setting up IO queues\n");
@@ -1225,7 +1230,7 @@ static int init_io_u(struct thread_data *td)
 		if (td->terminate)
 			return 1;
 
-		ptr = fio_memalign(cl_align, sizeof(*io_u));
+		ptr = fio_memalign(cl_align, sizeof(*io_u), td_offload_overlap(td));
 		if (!ptr) {
 			log_err("fio: unable to allocate aligned memory\n");
 			break;
@@ -1537,7 +1542,7 @@ static void *thread_main(void *data)
 	struct sk_out *sk_out = fd->sk_out;
 	uint64_t bytes_done[DDIR_RWDIR_CNT];
 	int deadlock_loop_cnt;
-	bool clear_state, did_some_io;
+	bool clear_state;
 	int ret;
 
 	sk_out_assign(sk_out);
@@ -1693,7 +1698,13 @@ static void *thread_main(void *data)
 	if (!init_iolog(td))
 		goto err;
 
+	if (td_io_init(td))
+		goto err;
+
 	if (init_io_u(td))
+		goto err;
+
+	if (td->io_ops->post_init && td->io_ops->post_init(td))
 		goto err;
 
 	if (o->verify_async && verify_async_init(td))
@@ -1721,9 +1732,6 @@ static void *thread_main(void *data)
 		goto err;
 
 	if (!o->create_serialize && setup_files(td))
-		goto err;
-
-	if (td_io_init(td))
 		goto err;
 
 	if (!init_random_map(td))
@@ -1758,7 +1766,6 @@ static void *thread_main(void *data)
 
 	memset(bytes_done, 0, sizeof(bytes_done));
 	clear_state = false;
-	did_some_io = false;
 
 	while (keep_running(td)) {
 		uint64_t verify_bytes;
@@ -1836,9 +1843,6 @@ static void *thread_main(void *data)
 		    td_ioengine_flagged(td, FIO_UNIDIR))
 			continue;
 
-		if (ddir_rw_sum(bytes_done))
-			did_some_io = true;
-
 		clear_io_state(td, 0);
 
 		fio_gettime(&td->start, NULL);
@@ -1860,19 +1864,15 @@ static void *thread_main(void *data)
 	}
 
 	/*
-	 * If td ended up with no I/O when it should have had,
-	 * then something went wrong unless FIO_NOIO or FIO_DISKLESSIO.
-	 * (Are we not missing other flags that can be ignored ?)
+	 * Acquire this lock if we were doing overlap checking in
+	 * offload mode so that we don't clean up this job while
+	 * another thread is checking its io_u's for overlap
 	 */
-	if ((td->o.size || td->o.io_size) && !ddir_rw_sum(bytes_done) &&
-	    !did_some_io && !td->o.create_only &&
-	    !(td_ioengine_flagged(td, FIO_NOIO) ||
-	      td_ioengine_flagged(td, FIO_DISKLESSIO)))
-		log_err("%s: No I/O performed by %s, "
-			 "perhaps try --debug=io option for details?\n",
-			 td->o.name, td->io_ops->name);
-
+	if (td_offload_overlap(td))
+		pthread_mutex_lock(&overlap_check);
 	td_set_runstate(td, TD_FINISHING);
+	if (td_offload_overlap(td))
+		pthread_mutex_unlock(&overlap_check);
 
 	update_rusage_stat(td);
 	td->ts.total_run_time = mtime_since_now(&td->epoch);

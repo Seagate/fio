@@ -88,21 +88,37 @@ static inline void __lfsr_next(struct fio_lfsr *fl, unsigned int spin)
 	 */
 	switch (spin) {
 		case 15: __LFSR_NEXT(fl, fl->last_val);
+		/* fall through */
 		case 14: __LFSR_NEXT(fl, fl->last_val);
+		/* fall through */
 		case 13: __LFSR_NEXT(fl, fl->last_val);
+		/* fall through */
 		case 12: __LFSR_NEXT(fl, fl->last_val);
+		/* fall through */
 		case 11: __LFSR_NEXT(fl, fl->last_val);
+		/* fall through */
 		case 10: __LFSR_NEXT(fl, fl->last_val);
+		/* fall through */
 		case  9: __LFSR_NEXT(fl, fl->last_val);
+		/* fall through */
 		case  8: __LFSR_NEXT(fl, fl->last_val);
+		/* fall through */
 		case  7: __LFSR_NEXT(fl, fl->last_val);
+		/* fall through */
 		case  6: __LFSR_NEXT(fl, fl->last_val);
+		/* fall through */
 		case  5: __LFSR_NEXT(fl, fl->last_val);
+		/* fall through */
 		case  4: __LFSR_NEXT(fl, fl->last_val);
+		/* fall through */
 		case  3: __LFSR_NEXT(fl, fl->last_val);
+		/* fall through */
 		case  2: __LFSR_NEXT(fl, fl->last_val);
+		/* fall through */
 		case  1: __LFSR_NEXT(fl, fl->last_val);
+		/* fall through */
 		case  0: __LFSR_NEXT(fl, fl->last_val);
+		/* fall through */
 		default: break;
 	}
 }
@@ -216,7 +232,7 @@ static int prepare_spin(struct fio_lfsr *fl, unsigned int spin)
 	return 0;
 }
 
-int lfsr_reset(struct fio_lfsr *fl, unsigned long seed)
+int lfsr_reset(struct fio_lfsr *fl, uint64_t seed)
 {
 	uint64_t bitmask = (fl->cached_bit << 1) - 1;
 
@@ -230,8 +246,8 @@ int lfsr_reset(struct fio_lfsr *fl, unsigned long seed)
 	return 0;
 }
 
-int lfsr_init(struct fio_lfsr *fl, uint64_t nums, unsigned long seed,
-		unsigned int spin)
+int lfsr_init(struct fio_lfsr *fl, uint64_t nums, uint64_t seed,
+	      unsigned int spin)
 {
 	uint8_t *taps;
 

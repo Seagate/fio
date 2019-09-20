@@ -245,7 +245,7 @@ struct thread_data {
 	void *iolog_buf;
 	FILE *iolog_f;
 
-	unsigned long rand_seeds[FIO_RAND_NR_OFFS];
+	uint64_t rand_seeds[FIO_RAND_NR_OFFS];
 
 	struct frand_state bsrange_state[DDIR_RWDIR_CNT];
 	struct frand_state verify_state;
@@ -772,6 +772,11 @@ static inline bool td_async_processing(struct thread_data *td)
 	return (td->flags & TD_F_NEED_LOCK) != 0;
 }
 
+static inline bool td_offload_overlap(struct thread_data *td)
+{
+	return td->o.serialize_overlap && td->o.io_submit_mode == IO_MODE_OFFLOAD;
+}
+
 /*
  * We currently only need to do locking if we have verifier threads
  * accessing our internal structures too
@@ -851,5 +856,8 @@ enum {
 
 extern void exec_trigger(const char *);
 extern void check_trigger_file(void);
+
+extern bool in_flight_overlap(struct io_u_queue *q, struct io_u *io_u);
+extern pthread_mutex_t overlap_check;
 
 #endif

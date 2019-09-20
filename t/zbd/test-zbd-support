@@ -141,9 +141,8 @@ test2() {
     if [ -z "$is_zbd" ]; then
 	opts+=("--zonesize=${zone_size}")
     fi
-    run_fio "${opts[@]}" 2>&1 |
-	tee -a "${logfile}.${test_number}" |
-	grep -q 'No I/O performed'
+    run_fio "${opts[@]}" >> "${logfile}.${test_number}" 2>&1 || return $?
+    ! grep -q 'WRITE:' "${logfile}.${test_number}"
 }
 
 # Run fio against an empty zone. This causes fio to report "No I/O performed".
@@ -160,12 +159,12 @@ test3() {
 	opts+=("--zonesize=${zone_size}")
     fi
     run_fio "${opts[@]}" >> "${logfile}.${test_number}" 2>&1 || return $?
-    grep -q "No I/O performed" "${logfile}.${test_number}"
+    grep -q 'READ:' "${logfile}.${test_number}"
     rc=$?
     if [ -n "$is_zbd" ]; then
-	[ $rc = 0 ]
-    else
 	[ $rc != 0 ]
+    else
+	[ $rc = 0 ]
     fi
 }
 
@@ -731,6 +730,17 @@ test45() {
 	grep -q "fio: first I/O failed. If .* is a zoned block device, consider --zonemode=zbd"
 }
 
+# Random write to sequential zones, libaio, 8 jobs, queue depth 64 per job
+test46() {
+    local size
+
+    size=$((4 * zone_size))
+    run_fio_on_seq --ioengine=libaio --iodepth=64 --rw=randwrite --bs=4K \
+		   --group_reporting=1 --numjobs=8 \
+		   >> "${logfile}.${test_number}" 2>&1 || return $?
+    check_written $((size * 8)) || return $?
+}
+
 tests=()
 dynamic_analyzer=()
 reset_all_zones=
@@ -761,7 +771,15 @@ source "$(dirname "$0")/functions" || exit $?
 dev=$1
 realdev=$(readlink -f "$dev")
 basename=$(basename "$realdev")
-disk_size=$(($(<"/sys/block/$basename/size")*512))
+major=$((0x$(stat -L -c '%t' "$realdev")))
+minor=$((0x$(stat -L -c '%T' "$realdev")))
+disk_size=$(($(<"/sys/dev/block/$major:$minor/size")*512))
+# When the target is a partition device, get basename of its holder device to
+# access sysfs path of the holder device
+if [[ -r "/sys/dev/block/$major:$minor/partition" ]]; then
+	realsysfs=$(readlink "/sys/dev/block/$major:$minor")
+	basename=$(basename "${realsysfs%/*}")
+fi
 logical_block_size=$(<"/sys/block/$basename/queue/logical_block_size")
 case "$(<"/sys/class/block/$basename/queue/zoned")" in
     host-managed|host-aware)
@@ -794,7 +812,7 @@ case "$(<"/sys/class/block/$basename/queue/zoned")" in
 esac
 
 if [ "${#tests[@]}" = 0 ]; then
-    for ((i=1;i<=45;i++)); do
+    for ((i=1;i<=46;i++)); do
 	tests+=("$i")
     done
 fi

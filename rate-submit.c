@@ -9,13 +9,54 @@
 #include "lib/getrusage.h"
 #include "rate-submit.h"
 
+static void check_overlap(struct io_u *io_u)
+{
+	int i;
+	struct thread_data *td;
+	bool overlap = false;
+
+	do {
+		/*
+		 * Allow only one thread to check for overlap at a
+		 * time to prevent two threads from thinking the coast
+		 * is clear and then submitting IOs that overlap with
+		 * each other
+		 *
+		 * If an overlap is found, release the lock and
+		 * re-acquire it before checking again to give other
+		 * threads a chance to make progress
+		 *
+		 * If an overlap is not found, release the lock when the
+		 * io_u's IO_U_F_FLIGHT flag is set so that this io_u
+		 * can be checked by other threads as they assess overlap
+		 */
+		pthread_mutex_lock(&overlap_check);
+		for_each_td(td, i) {
+			if (td->runstate <= TD_SETTING_UP ||
+				td->runstate >= TD_FINISHING ||
+				!td->o.serialize_overlap ||
+				td->o.io_submit_mode != IO_MODE_OFFLOAD)
+				continue;
+
+			overlap = in_flight_overlap(&td->io_u_all, io_u);
+			if (overlap) {
+				pthread_mutex_unlock(&overlap_check);
+				break;
+			}
+		}
+	} while (overlap);
+}
+
 static int io_workqueue_fn(struct submit_worker *sw,
 			   struct workqueue_work *work)
 {
 	struct io_u *io_u = container_of(work, struct io_u, work);
 	const enum fio_ddir ddir = io_u->ddir;
 	struct thread_data *td = sw->priv;
-	int ret;
+	int ret, error;
+
+	if (td->o.serialize_overlap)
+		check_overlap(io_u);
 
 	dprint(FD_RATE, "io_u %p queued by %u\n", io_u, gettid());
 
@@ -30,12 +71,14 @@ static int io_workqueue_fn(struct submit_worker *sw,
 		ret = io_u_queued_complete(td, 1);
 		if (ret > 0)
 			td->cur_depth -= ret;
+		else if (ret < 0)
+			break;
 		io_u_clear(td, io_u, IO_U_F_FLIGHT);
 	} while (1);
 
 	dprint(FD_RATE, "io_u %p ret %d by %u\n", io_u, ret, gettid());
 
-	io_queue_event(td, io_u, &ret, ddir, NULL, 0, NULL);
+	error = io_queue_event(td, io_u, &ret, ddir, NULL, 0, NULL);
 
 	if (ret == FIO_Q_COMPLETED)
 		td->cur_depth--;
@@ -50,11 +93,10 @@ static int io_workqueue_fn(struct submit_worker *sw,
 		ret = io_u_queued_complete(td, min_evts);
 		if (ret > 0)
 			td->cur_depth -= ret;
-	} else if (ret == FIO_Q_BUSY) {
-		ret = io_u_queued_complete(td, td->cur_depth);
-		if (ret > 0)
-			td->cur_depth -= ret;
 	}
+
+	if (error || td->error)
+		pthread_cond_signal(&td->parent->free_cond);
 
 	return 0;
 }
@@ -63,6 +105,8 @@ static bool io_workqueue_pre_sleep_flush_fn(struct submit_worker *sw)
 {
 	struct thread_data *td = sw->priv;
 
+	if (td->error)
+		return false;
 	if (td->io_u_queued || td->cur_depth || td->io_u_in_flight)
 		return true;
 
@@ -119,6 +163,9 @@ static int io_workqueue_init_worker_fn(struct submit_worker *sw)
 
 	td->o.iodepth = 1;
 	if (td_io_init(td))
+		goto err_io_init;
+
+	if (td->io_ops->post_init && td->io_ops->post_init(td))
 		goto err_io_init;
 
 	set_epoch_time(td, td->o.log_unix_epoch);

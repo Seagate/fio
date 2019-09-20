@@ -493,6 +493,9 @@ int fio_cpus_split(os_cpu_mask_t *mask, unsigned int cpu_index)
 	const long max_cpu = cpus_online();
 
 	cpus_in_mask = fio_cpu_count(mask);
+	if (!cpus_in_mask)
+		return 0;
+
 	cpu_index = cpu_index % cpus_in_mask;
 
 	index = 0;
@@ -1771,6 +1774,11 @@ struct fio_option fio_options[FIO_MAX_OPTS] = {
 #ifdef CONFIG_LIBAIO
 			  { .ival = "libaio",
 			    .help = "Linux native asynchronous IO",
+			  },
+#endif
+#ifdef ARCH_HAVE_IOURING
+			  { .ival = "io_uring",
+			    .help = "Fast Linux native aio",
 			  },
 #endif
 #ifdef CONFIG_POSIXAIO
@@ -4536,7 +4544,7 @@ struct fio_option fio_options[FIO_MAX_OPTS] = {
 	{
 		.name	= "kb_base",
 		.lname	= "KB Base",
-		.type	= FIO_OPT_INT,
+		.type	= FIO_OPT_STR,
 		.off1	= offsetof(struct thread_options, kb_base),
 		.prio	= 1,
 		.def	= "1024",
@@ -4557,7 +4565,7 @@ struct fio_option fio_options[FIO_MAX_OPTS] = {
 	{
 		.name	= "unit_base",
 		.lname	= "Unit for quantities of data (Bits or Bytes)",
-		.type	= FIO_OPT_INT,
+		.type	= FIO_OPT_STR,
 		.off1	= offsetof(struct thread_options, unit_base),
 		.prio	= 1,
 		.posval = {

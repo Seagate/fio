@@ -829,7 +829,8 @@ static unsigned long long get_fs_free_counts(struct thread_data *td)
 			continue;
 
 		fm = calloc(1, sizeof(*fm));
-		strncpy(fm->__base, buf, sizeof(fm->__base) - 1);
+		strncpy(fm->__base, buf, sizeof(fm->__base));
+		fm->__base[255] = '\0'; 
 		fm->base = basename(fm->__base);
 		fm->key = sb.st_dev;
 		flist_add(&fm->list, &list);
@@ -890,6 +891,42 @@ uint64_t get_start_offset(struct thread_data *td, struct fio_file *f)
 	return offset;
 }
 
+static bool create_work_dirs(struct thread_data *td, const char *fname)
+{
+	char path[PATH_MAX];
+	char *start, *end;
+
+	if (td->o.directory) {
+		snprintf(path, PATH_MAX, "%s%c%s", td->o.directory,
+			 FIO_OS_PATH_SEPARATOR, fname);
+		start = strstr(path, fname);
+	} else {
+		snprintf(path, PATH_MAX, "%s", fname);
+		start = path;
+	}
+
+	end = start;
+	while ((end = strchr(end, FIO_OS_PATH_SEPARATOR)) != NULL) {
+		if (end == start)
+			break;
+		*end = '\0';
+		errno = 0;
+#ifdef CONFIG_HAVE_MKDIR_TWO
+		if (mkdir(path, 0600) && errno != EEXIST) {
+#else
+		if (mkdir(path) && errno != EEXIST) {
+#endif
+			log_err("fio: failed to create dir (%s): %d\n",
+				start, errno);
+			return false;
+		}
+		*end = FIO_OS_PATH_SEPARATOR;
+		end++;
+	}
+	td->flags |= TD_F_DIRS_CREATED;
+	return true;
+}
+
 /*
  * Open the files and setup files sizes, creating files if necessary.
  */
@@ -908,8 +945,13 @@ int setup_files(struct thread_data *td)
 
 	old_state = td_bump_runstate(td, TD_SETTING_UP);
 
-	if (o->read_iolog_file)
-		goto done;
+	for_each_file(td, f, i) {
+		if (!td_ioengine_flagged(td, FIO_DISKLESSIO) &&
+		    strchr(f->file_name, FIO_OS_PATH_SEPARATOR) &&
+		    !(td->flags & TD_F_DIRS_CREATED) &&
+		    !create_work_dirs(td, f->file_name))
+			goto err_out;
+	}
 
 	/*
 	 * Find out physical size of files or devices for this thread,
@@ -925,6 +967,9 @@ int setup_files(struct thread_data *td)
 
 	if (err)
 		goto err_out;
+
+	if (o->read_iolog_file)
+		goto done;
 
 	/*
 	 * check sizes. if the files/devices do not exist and the size
@@ -1287,7 +1332,7 @@ bool init_random_map(struct thread_data *td)
 			return false;
 
 		if (td->o.random_generator == FIO_RAND_GEN_LFSR) {
-			unsigned long seed;
+			uint64_t seed;
 
 			seed = td->rand_seeds[FIO_RAND_BLOCK_OFF];
 
@@ -1517,42 +1562,6 @@ bool exists_and_not_regfile(const char *filename)
 	return true;
 }
 
-static bool create_work_dirs(struct thread_data *td, const char *fname)
-{
-	char path[PATH_MAX];
-	char *start, *end;
-
-	if (td->o.directory) {
-		snprintf(path, PATH_MAX, "%s%c%s", td->o.directory,
-			 FIO_OS_PATH_SEPARATOR, fname);
-		start = strstr(path, fname);
-	} else {
-		snprintf(path, PATH_MAX, "%s", fname);
-		start = path;
-	}
-
-	end = start;
-	while ((end = strchr(end, FIO_OS_PATH_SEPARATOR)) != NULL) {
-		if (end == start)
-			break;
-		*end = '\0';
-		errno = 0;
-#ifdef CONFIG_HAVE_MKDIR_TWO
-		if (mkdir(path, 0600) && errno != EEXIST) {
-#else
-		if (mkdir(path) && errno != EEXIST) {
-#endif
-			log_err("fio: failed to create dir (%s): %d\n",
-				start, errno);
-			return false;
-		}
-		*end = FIO_OS_PATH_SEPARATOR;
-		end++;
-	}
-	td->flags |= TD_F_DIRS_CREATED;
-	return true;
-}
-
 int add_file(struct thread_data *td, const char *fname, int numjob, int inc)
 {
 	int cur_files = td->files_index;
@@ -1567,11 +1576,6 @@ int add_file(struct thread_data *td, const char *fname, int numjob, int inc)
 					td->o.unique_filename);
 
 	sprintf(file_name + len, "%s", fname);
-
-	if (strchr(fname, FIO_OS_PATH_SEPARATOR) &&
-	    !(td->flags & TD_F_DIRS_CREATED) &&
-	    !create_work_dirs(td, fname))
-		return 1;
 
 	/* clean cloned siblings using existing files */
 	if (numjob && is_already_allocated(file_name) &&

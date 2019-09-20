@@ -8,10 +8,21 @@
 #include <unistd.h>
 #include <errno.h>
 #include <libaio.h>
+#include <sys/time.h>
+#include <sys/resource.h>
 
 #include "../fio.h"
 #include "../lib/pow2.h"
 #include "../optgroup.h"
+#include "../lib/memalign.h"
+
+#ifndef IOCB_FLAG_HIPRI
+#define IOCB_FLAG_HIPRI	(1 << 2)
+#endif
+
+#ifndef IOCTX_FLAG_IOPOLL
+#define IOCTX_FLAG_IOPOLL	(1 << 0)
+#endif
 
 /* Should be defined in newest aio_abi.h */
 #ifndef IOCB_FLAG_IOPRIO
@@ -36,6 +47,8 @@ struct libaio_data {
 	unsigned long prio_seed;
 	struct frand_state prio_state;
 
+	struct io_u **io_u_index;
+
 	/*
 	 * Basic ring buffer. 'head' is incremented in _queue(), and
 	 * 'tail' is incremented in _commit(). We keep 'queued' so
@@ -55,6 +68,7 @@ struct libaio_options {
 	void *pad;
 	unsigned int userspace_reap;
 	unsigned int prio_percent;
+	unsigned int hipri;
 };
 
 static struct fio_option options[] = {
@@ -91,6 +105,15 @@ static struct fio_option options[] = {
 	},
 #endif
 	{
+		.name	= "hipri",
+		.lname	= "High Priority",
+		.type	= FIO_OPT_STR_SET,
+		.off1	= offsetof(struct libaio_options, hipri),
+		.help	= "Use polled IO completions",
+		.category = FIO_OPT_C_ENGINE,
+		.group	= FIO_OPT_G_LIBAIO,
+	},
+	{
 		.name	= NULL,
 	},
 };
@@ -107,13 +130,21 @@ static inline void ring_inc(struct libaio_data *ld, unsigned int *val,
 static int fio_libaio_prep(struct thread_data fio_unused *td, struct io_u *io_u)
 {
 	struct fio_file *f = io_u->file;
+	struct libaio_options *o = td->eo;
+	struct iocb *iocb;
 
-	if (io_u->ddir == DDIR_READ)
-		io_prep_pread(&io_u->iocb, f->fd, io_u->xfer_buf, io_u->xfer_buflen, io_u->offset);
-	else if (io_u->ddir == DDIR_WRITE)
-		io_prep_pwrite(&io_u->iocb, f->fd, io_u->xfer_buf, io_u->xfer_buflen, io_u->offset);
-	else if (ddir_sync(io_u->ddir))
-		io_prep_fsync(&io_u->iocb, f->fd);
+	iocb = &io_u->iocb;
+
+	if (io_u->ddir == DDIR_READ) {
+		io_prep_pread(iocb, f->fd, io_u->xfer_buf, io_u->xfer_buflen, io_u->offset);
+		if (o->hipri)
+			iocb->u.c.flags |= IOCB_FLAG_HIPRI;
+	} else if (io_u->ddir == DDIR_WRITE) {
+		io_prep_pwrite(iocb, f->fd, io_u->xfer_buf, io_u->xfer_buflen, io_u->offset);
+		if (o->hipri)
+			iocb->u.c.flags |= IOCB_FLAG_HIPRI;
+	} else if (ddir_sync(io_u->ddir))
+		io_prep_fsync(iocb, f->fd);
 
 	return 0;
 }
@@ -397,30 +428,57 @@ static void fio_libaio_cleanup(struct thread_data *td)
 	}
 }
 
-static int fio_libaio_init(struct thread_data *td)
+static int fio_libaio_old_queue_init(struct libaio_data *ld, unsigned int depth,
+				     bool hipri)
 {
-	struct libaio_options *o = td->eo;
-	struct libaio_data *ld;
-	struct thread_options *to = &td->o;
-	int err = 0;
-
-	ld = calloc(1, sizeof(*ld));
-
-	/*
-	 * First try passing in 0 for queue depth, since we don't
-	 * care about the user ring. If that fails, the kernel is too old
-	 * and we need the right depth.
-	 */
-	if (!o->userspace_reap)
-		err = io_queue_init(INT_MAX, &ld->aio_ctx);
-	if (o->userspace_reap || err == -EINVAL)
-		err = io_queue_init(td->o.iodepth, &ld->aio_ctx);
-	if (err) {
-		td_verror(td, -err, "io_queue_init");
-		log_err("fio: check /proc/sys/fs/aio-max-nr\n");
-		free(ld);
+	if (hipri) {
+		log_err("fio: polled aio not available on your platform\n");
 		return 1;
 	}
+
+	return io_queue_init(depth, &ld->aio_ctx);
+}
+
+static int fio_libaio_queue_init(struct libaio_data *ld, unsigned int depth,
+				 bool hipri)
+{
+#ifdef __NR_sys_io_setup2
+	int ret, flags = 0;
+
+	if (hipri)
+		flags |= IOCTX_FLAG_IOPOLL;
+
+	ret = syscall(__NR_sys_io_setup2, depth, flags, NULL, NULL,
+			&ld->aio_ctx);
+	if (!ret)
+		return 0;
+	/* fall through to old syscall */
+#endif
+	return fio_libaio_old_queue_init(ld, depth, hipri);
+}
+
+static int fio_libaio_post_init(struct thread_data *td)
+{
+	struct libaio_data *ld = td->io_ops_data;
+	struct libaio_options *o = td->eo;
+	int err = 0;
+
+	err = fio_libaio_queue_init(ld, td->o.iodepth, o->hipri);
+	if (err) {
+		td_verror(td, -err, "io_queue_init");
+		return 1;
+	}
+
+	return 0;
+}
+
+static int fio_libaio_init(struct thread_data *td)
+{
+	struct libaio_data *ld;
+	struct thread_options *to = &td->o;
+	struct libaio_options *o = td->eo;
+
+	ld = calloc(1, sizeof(*ld));
 
 	ld->entries = td->o.iodepth;
 	ld->is_pow2 = is_power_of_2(ld->entries);
@@ -451,7 +509,9 @@ static int fio_libaio_init(struct thread_data *td)
 static struct ioengine_ops ioengine = {
 	.name			= "libaio",
 	.version		= FIO_IOOPS_VERSION,
+	.flags			= FIO_ASYNCIO_SYNC_TRIM,
 	.init			= fio_libaio_init,
+	.post_init		= fio_libaio_post_init,
 	.prep			= fio_libaio_prep,
 	.queue			= fio_libaio_queue,
 	.commit			= fio_libaio_commit,

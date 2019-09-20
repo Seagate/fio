@@ -59,6 +59,7 @@ struct group_run_stats client_gs;
 int sum_stat_clients;
 
 static int sum_stat_nr;
+static struct buf_output allclients;
 static struct json_object *root = NULL;
 static struct json_object *job_opt_object = NULL;
 static struct json_array *clients_array = NULL;
@@ -1000,6 +1001,7 @@ static void convert_ts(struct thread_stat *dst, struct thread_stat *src)
 
 	dst->total_submit	= le64_to_cpu(src->total_submit);
 	dst->total_complete	= le64_to_cpu(src->total_complete);
+	dst->nr_zone_resets	= le64_to_cpu(src->nr_zone_resets);
 
 	for (i = 0; i < DDIR_RWDIR_CNT; i++) {
 		dst->io_bytes[i]	= le64_to_cpu(src->io_bytes[i]);
@@ -1045,6 +1047,9 @@ static void convert_ts(struct thread_stat *dst, struct thread_stat *src)
 			dst->ss_bw_data[i] = le64_to_cpu(src->ss_bw_data[i]);
 		}
 	}
+
+	dst->cachehit		= le64_to_cpu(src->cachehit);
+	dst->cachemiss		= le64_to_cpu(src->cachemiss);
 }
 
 static void convert_gs(struct group_run_stats *dst, struct group_run_stats *src)
@@ -1106,7 +1111,7 @@ static void handle_ts(struct fio_client *client, struct fio_net_cmd *cmd)
 
 	if (++sum_stat_nr == sum_stat_clients) {
 		strcpy(client_ts.name, "All clients");
-		tsobj = show_thread_status(&client_ts, &client_gs, NULL, &client->buf);
+		tsobj = show_thread_status(&client_ts, &client_gs, NULL, &allclients);
 		if (tsobj) {
 			json_object_add_client_info(tsobj, client);
 			json_array_add_value_object(clients_array, tsobj);
@@ -1221,11 +1226,14 @@ static void handle_du(struct fio_client *client, struct fio_net_cmd *cmd)
 		json_array_add_disk_util(&du->dus, &du->agg, du_array);
 		duobj = json_array_last_value_object(du_array);
 		json_object_add_client_info(duobj, client);
-	} else if (output_format & FIO_OUTPUT_TERSE)
-		print_disk_util(&du->dus, &du->agg, 1, &client->buf);
-	else if (output_format & FIO_OUTPUT_NORMAL) {
+	}
+	if (output_format & FIO_OUTPUT_NORMAL) {
 		__log_buf(&client->buf, "\nDisk stats (read/write):\n");
 		print_disk_util(&du->dus, &du->agg, 0, &client->buf);
+	}
+	if (output_format & FIO_OUTPUT_TERSE && terse_version >= 3) {
+		print_disk_util(&du->dus, &du->agg, 1, &client->buf);
+		__log_buf(&client->buf, "\n");
 	}
 }
 
@@ -1601,6 +1609,11 @@ static struct cmd_iolog_pdu *convert_iolog_gz(struct fio_net_cmd *cmd,
 		err = inflate(&stream, Z_NO_FLUSH);
 		/* may be Z_OK, or Z_STREAM_END */
 		if (err < 0) {
+			/*
+			 * Z_STREAM_ERROR and Z_BUF_ERROR can safely be
+			 * ignored */
+			if (err == Z_STREAM_ERROR || err == Z_BUF_ERROR)
+				break;
 			log_err("fio: inflate error %d\n", err);
 			free(ret);
 			ret = NULL;
@@ -2126,6 +2139,9 @@ int fio_handle_clients(struct client_ops *ops)
 			fio_put_client(client);
 		}
 	}
+
+	log_info_buf(allclients.buf, allclients.buflen);
+	buf_output_free(&allclients);
 
 	fio_client_json_fini();
 

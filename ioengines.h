@@ -7,7 +7,7 @@
 #include "flist.h"
 #include "io_u.h"
 
-#define FIO_IOOPS_VERSION	24
+#define FIO_IOOPS_VERSION	25
 
 /*
  * io_ops->queue() return values
@@ -25,6 +25,7 @@ struct ioengine_ops {
 	int flags;
 	int (*setup)(struct thread_data *);
 	int (*init)(struct thread_data *);
+	int (*post_init)(struct thread_data *);
 	int (*prep)(struct thread_data *, struct io_u *);
 	void (*prio_prep)(struct thread_data *, struct io_u *);
 	enum fio_q_status (*queue)(struct thread_data *, struct io_u *);
@@ -63,6 +64,8 @@ enum fio_ioengine_flags {
 	FIO_FAKEIO	= 1 << 11,	/* engine pretends to do IO */
 	FIO_NOSTATS	= 1 << 12,	/* don't do IO stats */
 	FIO_NOFILEHASH	= 1 << 13,	/* doesn't hash the files for lookup later. */
+	FIO_ASYNCIO_SYNC_TRIM
+			= 1 << 14	/* io engine has async ->queue except for trim */
 };
 
 /*

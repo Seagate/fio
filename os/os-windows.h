@@ -162,12 +162,14 @@ static inline unsigned long long os_phys_mem(void)
 	return (unsigned long long) pages * (unsigned long long) pagesize;
 }
 
+#ifndef CONFIG_HAVE_GETTID
 static inline int gettid(void)
 {
 	return GetCurrentThreadId();
 }
+#endif
 
-static inline int init_random_seeds(unsigned long *rand_seeds, int size)
+static inline int init_random_seeds(uint64_t *rand_seeds, int size)
 {
 	HCRYPTPROV hCryptProv;
 

@@ -252,7 +252,9 @@ struct thread_stat {
 		uint64_t *ss_bw_data;
 		uint64_t pad5;
 	};
-}__attribute__((packed));
+	uint64_t cachehit;
+	uint64_t cachemiss;
+} __attribute__((packed));
 
 struct jobs_eta {
 	uint32_t nr_running;
