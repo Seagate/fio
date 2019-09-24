@@ -567,6 +567,30 @@ static bool zbd_verify_sizes(void)
 				continue;
 			if (!zbd_is_seq_job(f))
 				continue;
+
+			if (!td->o.zone_size) {
+				td->o.zone_size = f->zbd_info->zone_size;
+				if (!td->o.zone_size) {
+					log_err("%s: invalid 0 zone size\n",
+						f->file_name);
+					return false;
+				}
+			} else if (td->o.zone_size != f->zbd_info->zone_size) {
+				log_err("%s: job parameter zonesize %llu does not match disk zone size %llu.\n",
+					f->file_name, (unsigned long long) td->o.zone_size,
+					(unsigned long long) f->zbd_info->zone_size);
+				return false;
+			}
+
+			if (td->o.zone_skip &&
+			    (td->o.zone_skip < td->o.zone_size ||
+			     td->o.zone_skip % td->o.zone_size)) {
+				log_err("%s: zoneskip %llu is not a multiple of the device zone size %llu.\n",
+					f->file_name, (unsigned long long) td->o.zone_skip,
+					(unsigned long long) td->o.zone_size);
+				return false;
+			}
+
 			zone_idx = zbd_zone_idx(f, f->file_offset);
 			z = &f->zbd_info->zone_info[zone_idx];
 			if (f->file_offset != z->start) {
@@ -820,13 +844,23 @@ static int init_zone_info(struct thread_data *td, struct fio_file *f)
 {
 	uint32_t nr_zones;
 	struct fio_zone_info *p;
-	uint64_t zone_size;
+	uint64_t zone_size = td->o.zone_size;
 	struct zoned_block_device_info *zbd_info = NULL;
 	pthread_mutexattr_t attr;
 	int i;
 
-	zone_size = td->o.zone_size;
-	assert(zone_size);
+	if (zone_size == 0) {
+		log_err("%s: Specifying the zone size is mandatory for regular block devices with --zonemode=zbd\n\n",
+			f->file_name);
+		return 1;
+	}
+
+	if (zone_size < 512) {
+		log_err("%s: zone size must be at least 512 bytes for --zonemode=zbd\n\n",
+			f->file_name);
+		return 1;
+	}
+
 	nr_zones = (f->real_file_size + zone_size - 1) / zone_size;
 	zbd_info = scalloc(1, sizeof(*zbd_info) +
 			   (nr_zones + 1) * sizeof(zbd_info->zone_info[0]));
@@ -914,8 +948,8 @@ static int parse_zone_info(struct thread_data *td, struct fio_file *f)
 	if (td->o.zone_size == 0) {
 		td->o.zone_size = zone_size;
 	} else if (td->o.zone_size != zone_size) {
-		log_info("fio: %s job parameter zonesize %llu does not match disk zone size %llu.\n",
-			 f->file_name, (unsigned long long) td->o.zone_size,
+		log_err("fio: %s job parameter zonesize %llu does not match disk zone size %llu.\n",
+			f->file_name, (unsigned long long) td->o.zone_size,
 			(unsigned long long) zone_size);
 		ret = -EINVAL;
 		goto close;
@@ -1012,7 +1046,7 @@ out:
  *
  * Returns 0 upon success and a negative error code upon failure.
  */
-int zbd_create_zone_info(struct thread_data *td, struct fio_file *f)
+static int zbd_create_zone_info(struct thread_data *td, struct fio_file *f)
 {
 	enum blk_zoned_model zbd_model;
 	int ret = 0;
@@ -1080,7 +1114,7 @@ static int zbd_init_zone_info(struct thread_data *td, struct fio_file *file)
 
 	ret = zbd_create_zone_info(td, file);
 	if (ret < 0)
-		td_verror(td, -ret, "BLKREPORTZONE failed");
+		td_verror(td, -ret, "zbd_create_zone_info() failed");
 	return ret;
 }
 
@@ -1092,18 +1126,8 @@ int zbd_init(struct thread_data *td)
 	for_each_file(td, f, i) {
 		if (f->filetype != FIO_TYPE_BLOCK)
 			continue;
-		if (td->o.zone_size && td->o.zone_size < 512) {
-			log_err("%s: zone size must be at least 512 bytes for --zonemode=zbd\n\n",
-				f->file_name);
+		if (zbd_init_zone_info(td, f))
 			return 1;
-		}
-		if (td->o.zone_size == 0 &&
-		    get_zbd_model(f->file_name) == ZBD_DM_NONE) {
-			log_err("%s: Specifying the zone size is mandatory for regular block devices with --zonemode=zbd\n\n",
-				f->file_name);
-			return 1;
-		}
-		zbd_init_zone_info(td, f);
 	}
 
 	if (!zbd_using_direct_io()) {
@@ -1487,8 +1511,8 @@ static void zbd_close_zone(struct thread_data *td, const struct fio_file *f,
  * a multiple of the fio block size. The caller must neither hold z->mutex
  * nor f->zbd_info->mutex. Returns with z->mutex held upon success.
  */
-struct fio_zone_info *zbd_convert_to_open_zone(struct thread_data *td,
-					       struct io_u *io_u)
+static struct fio_zone_info *zbd_convert_to_open_zone(struct thread_data *td,
+						      struct io_u *io_u)
 {
 	const uint32_t min_bs = td->o.min_bs[io_u->ddir];
 	const struct fio_file *f = io_u->file;
@@ -1695,7 +1719,7 @@ static void zbd_queue_io(struct io_u *io_u, int q, bool success)
 	assert(zone_idx < zbd_info->nr_zones);
 	z = &zbd_info->zone_info[zone_idx];
 
-	if (z->type != BLK_ZONE_TYPE_SEQWRITE_REQ)
+	if (z->type != BLK_ZONE_TYPE_SEQWRITE_REQ && z->type != FLEX_ZONE_TYPE)
 		return;
 
 	if (!success)
@@ -1771,6 +1795,65 @@ bool zbd_unaligned_write(int error_code)
 		return true;
 	}
 	return false;
+}
+
+/**
+ * setup_zbd_zone_mode - handle zoneskip as necessary for ZBD drives
+ * @td: FIO thread data.
+ * @io_u: FIO I/O unit.
+ *
+ * For sequential workloads, change the file offset to skip zoneskip bytes when
+ * no more IO can be performed in the current zone.
+ * - For read workloads, zoneskip is applied when the io has reached the end of
+ *   the zone or the zone write position (when td->o.read_beyond_wp is false).
+ * - For write workloads, zoneskip is applied when the zone is full.
+ * This applies only to read and write operations.
+ */
+void setup_zbd_zone_mode(struct thread_data *td, struct io_u *io_u)
+{
+	struct fio_file *f = io_u->file;
+	enum fio_ddir ddir = io_u->ddir;
+	struct fio_zone_info *z;
+	uint32_t zone_idx;
+
+	assert(td->o.zone_mode == ZONE_MODE_ZBD);
+	assert(td->o.zone_size);
+
+	/*
+	 * zone_skip is valid only for sequential workloads.
+	 */
+	if (td_random(td) || !td->o.zone_skip)
+		return;
+
+	/*
+	 * It is time to switch to a new zone if:
+	 * - zone_bytes == zone_size bytes have already been accessed
+	 * - The last position reached the end of the current zone.
+	 * - For reads with td->o.read_beyond_wp == false, the last position
+	 *   reached the zone write pointer.
+	 */
+	zone_idx = zbd_zone_idx(f, f->last_pos[ddir]);
+	z = &f->zbd_info->zone_info[zone_idx];
+
+	if (td->zone_bytes >= td->o.zone_size ||
+	    f->last_pos[ddir] >= (z+1)->start ||
+	    (ddir == DDIR_READ &&
+	     (!td->o.read_beyond_wp) && f->last_pos[ddir] >= z->wp)) {
+		/*
+		 * Skip zones.
+		 */
+		td->zone_bytes = 0;
+		f->file_offset += td->o.zone_size + td->o.zone_skip;
+
+		/*
+		 * Wrap from the beginning, if we exceed the file size
+		 */
+		if (f->file_offset >= f->real_file_size)
+			f->file_offset = get_start_offset(td, f);
+
+		f->last_pos[ddir] = f->file_offset;
+		td->io_skip_bytes += td->o.zone_skip;
+	}
 }
 
 /**
