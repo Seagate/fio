@@ -135,11 +135,19 @@ static int sg_send_cdb(int fd, unsigned char* cdb_buf, unsigned char cdb_len,
 	}
 	return 0;
 }
-
-static int sg_get_flex(int fd, bool* is_flex) {
+/**
+ * sg_read_log_ext - send read log extended CDBs
+ * @fd: file descriptor
+ * @log_address: address of the log to fetch
+ * @subpage: subpage to fetch (usually 0)
+ * @ret_buf: buffer to store the output in
+ * @buf_len: length of the buffer--this will
+ *	control how many pages (512 blocks) are fetched as well
+*/
+static int sg_read_log_ext(int fd, uint16_t log_address, uint16_t subpage,
+		unsigned char* ret_buf, int buf_len) {
 	unsigned char rle_cmd_blk[16];
-	unsigned char ret_buf[512];
-	int ret;
+	uint16_t page_count = buf_len / 512;
 
 	rle_cmd_blk[0] = 0x85;
 	rle_cmd_blk[1] = 0x09;
@@ -148,15 +156,15 @@ static int sg_get_flex(int fd, bool* is_flex) {
 	rle_cmd_blk[3] = 0x00;
 	rle_cmd_blk[4] = 0x00;
 	// Upper and lower page count
-	rle_cmd_blk[5] = 0;
-	rle_cmd_blk[6] = 1;
+	rle_cmd_blk[5] = (page_count >> 8) & 0xFF;
+	rle_cmd_blk[6] = page_count & 0xFF;
 	// Reserved
 	rle_cmd_blk[7] = 0x00;
 	// Log address
 	rle_cmd_blk[8] = 0x30;
 	// Upper and lower page number
-	rle_cmd_blk[9] = 0x00;
-	rle_cmd_blk[10] = 0x03;
+	rle_cmd_blk[9] = (subpage >> 8) & 0xFF;
+	rle_cmd_blk[10] = subpage & 0xFF;
 	// Reserved
 	rle_cmd_blk[11] = 0x00;
 	rle_cmd_blk[12] = 0x00;
@@ -167,11 +175,28 @@ static int sg_get_flex(int fd, bool* is_flex) {
 	// Control byte
 	rle_cmd_blk[15] = 0x00;
 
-	ret = sg_send_cdb(fd, rle_cmd_blk, 16, ret_buf, 512, NULL);
-	if (ret < 0)
-		return ret;
+	return sg_send_cdb(fd, rle_cmd_blk, 16, ret_buf, 512, NULL);
+}
 
-	*is_flex = (bool) (ret_buf[105] & 1);
+static int sg_get_flex_zd(int fd, bool* is_flex) {
+	unsigned char ret_buf[512];
+	int ret;
+
+	// This may not succeed, but if it doesn't we want
+	// to check zone domains anyway, so ignore
+	// command failures here
+	ret = sg_read_log_ext(fd, 0x30, 3, ret_buf, 512);
+	if (ret == 0)
+		*is_flex = (bool) (ret_buf[105] & 1);
+
+	if (*is_flex) {
+		return 0;
+	}
+	ret = sg_read_log_ext(fd, 0x30, 9, ret_buf, 512);
+	if (ret) {
+		return ret;
+	}
+	*is_flex = (bool) (ret_buf[56] & 1);
 	return 0;
 }
 
@@ -757,7 +782,7 @@ static enum blk_zoned_model get_zbd_model(const char *file_name)
 	char *model_str = NULL;
 	struct stat statbuf;
 	int fd = -1;
-	bool flex_drive;
+	bool flex_drive = false;
 	char *sys_devno_path = NULL;
 	char *part_attr_path = NULL;
 	char *part_str = NULL;
@@ -806,11 +831,11 @@ static enum blk_zoned_model get_zbd_model(const char *file_name)
 	else if (strcmp(model_str, "host-managed") == 0)
 		model = ZBD_DM_HOST_MANAGED;
 	else {
-		// Check whether drive is FLEX drive
+		// Check whether drive is FLEX/zone domains drive
 		fd = open(file_name, O_RDONLY | O_LARGEFILE);
-		if (sg_get_flex(fd, &flex_drive) != 0)
-			goto out;
-		// Treat FLEX drives like host managed
+		// This may not succeed, but if it doesn't it's definitely not a FLEX drive
+		sg_get_flex_zd(fd, &flex_drive);
+		// Treat FLEX/zone domains drives like host managed
 		if (flex_drive)
 			model = ZBD_DM_HOST_MANAGED;
 	}
