@@ -112,8 +112,8 @@ only applies to job sections. The reserved *global* section is always
 parsed and used.
 .TP
 .BI \-\-alloc\-size \fR=\fPkb
-Set the internal smalloc pool size to \fIkb\fR in KiB. The
-\fB\-\-alloc\-size\fR switch allows one to use a larger pool size for smalloc.
+Allocate additional internal smalloc pools of size \fIkb\fR in KiB. The
+\fB\-\-alloc\-size\fR option increases shared memory set aside for use by fio.
 If running large jobs with randommap enabled, fio can run out of memory.
 Smalloc is an internal allocator for shared structures from a fixed size
 memory pool and can grow to 16 pools. The pool size defaults to 16MiB.
@@ -753,7 +753,10 @@ restricted to a single zone.
 .RE
 .TP
 .BI zonerange \fR=\fPint
-Size of a single zone. See also \fBzonesize\fR and \fBzoneskip\fR.
+For \fBzonemode\fR=strided, this is the size of a single zone. See also
+\fBzonesize\fR and \fBzoneskip\fR.
+
+For \fBzonemode\fR=zbd, this parameter is ignored.
 .TP
 .BI zonesize \fR=\fPint
 For \fBzonemode\fR=strided, this is the number of bytes to transfer before
@@ -762,13 +765,21 @@ skipping \fBzoneskip\fR bytes. If this parameter is smaller than
 will be accessed.  If this parameter is larger than \fBzonerange\fR then each
 zone will be accessed multiple times before skipping to the next zone.
 
-For \fBzonemode\fR=zbd, this is the size of a single zone. The \fBzonerange\fR
-parameter is ignored in this mode.
+For \fBzonemode\fR=zbd, this is the size of a single zone. The
+\fBzonerange\fR parameter is ignored in this mode. For a job accessing a
+zoned block device, the specified \fBzonesize\fR must be 0 or equal to the
+device zone size. For a regular block device or file, the specified
+\fBzonesize\fR must be at least 512B.
 .TP
 .BI zoneskip \fR=\fPint
 For \fBzonemode\fR=strided, the number of bytes to skip after \fBzonesize\fR
-bytes of data have been transferred. This parameter must be zero for
-\fBzonemode\fR=zbd.
+bytes of data have been transferred.
+
+For \fBzonemode\fR=zbd, the \fBzonesize\fR aligned number of bytes to skip
+once a zone is fully written (write workloads) or all written data in the
+zone have been read (read workloads). This parameter is valid only for
+sequential workloads and ignored for random workloads. For read workloads,
+see also \fBread_beyond_wp\fR.
 
 .TP
 .BI read_beyond_wp \fR=\fPbool
@@ -778,10 +789,10 @@ Zoned block devices are block devices that consist of multiple zones. Each
 zone has a type, e.g. conventional or sequential. A conventional zone can be
 written at any offset that is a multiple of the block size. Sequential zones
 must be written sequentially. The position at which a write must occur is
-called the write pointer. A zoned block device can be either drive
-managed, host managed or host aware. For host managed devices the host must
-ensure that writes happen sequentially. Fio recognizes host managed devices
-and serializes writes to sequential zones for these devices.
+called the write pointer. A zoned block device can be either host managed or
+host aware. For host managed devices the host must ensure that writes happen
+sequentially. Fio recognizes host managed devices and serializes writes to
+sequential zones for these devices.
 
 If a read occurs in a sequential zone beyond the write pointer then the zoned
 block device will complete the read without reading any data from the storage
@@ -1015,7 +1026,9 @@ If this is provided, then the real offset becomes `\fBoffset\fR + \fBoffset_incr
 is incremented for each sub\-job (i.e. when \fBnumjobs\fR option is
 specified). This option is useful if there are several jobs which are
 intended to operate on a file in parallel disjoint segments, with even
-spacing between the starting points.
+spacing between the starting points. Percentages can be used for this option.
+If a percentage is given, the generated offset will be aligned to the minimum
+\fBblocksize\fR or to the value of \fBoffset_align\fR if provided.
 .TP
 .BI number_ios \fR=\fPint
 Fio will normally perform I/Os until it has exhausted the size of the region
@@ -1756,11 +1769,43 @@ FIO will then decide when to commit these requests.
 .TP
 .B libiscsi
 Read and write iscsi lun with libiscsi.
+.TP
+.B nbd
+Synchronous read and write a Network Block Device (NBD).
 .SS "I/O engine specific parameters"
 In addition, there are some parameters which are only valid when a specific
 \fBioengine\fR is in use. These are used identically to normal parameters,
 with the caveat that when used on the command line, they must come after the
 \fBioengine\fR that defines them is selected.
+.TP
+.BI (io_uring)hipri
+If this option is set, fio will attempt to use polled IO completions. Normal IO
+completions generate interrupts to signal the completion of IO, polled
+completions do not. Hence they are require active reaping by the application.
+The benefits are more efficient IO for high IOPS scenarios, and lower latencies
+for low queue depth IO.
+.TP
+.BI (io_uring)fixedbufs
+If fio is asked to do direct IO, then Linux will map pages for each IO call, and
+release them when IO is done. If this option is set, the pages are pre-mapped
+before IO is started. This eliminates the need to map and release for each IO.
+This is more efficient, and reduces the IO latency as well.
+.TP
+.BI (io_uring)registerfiles
+With this option, fio registers the set of files being used with the kernel.
+This avoids the overhead of managing file counts in the kernel, making the
+submission and completion part more lightweight. Required for the below
+sqthread_poll option.
+.TP
+.BI (io_uring)sqthread_poll
+Normally fio will submit IO by issuing a system call to notify the kernel of
+available items in the SQ ring. If this option is set, the act of submitting IO
+will be done by a polling thread in the kernel. This frees up cycles for fio, at
+the cost of using more CPU in the system.
+.TP
+.BI (io_uring)sqthread_poll_cpu
+When `sqthread_poll` is set, this option provides a way to define which CPU
+should be used for the polling thread.
 .TP
 .BI (libaio)userspace_reap
 Normally, with the libaio engine in use, fio will use the
@@ -1768,6 +1813,11 @@ Normally, with the libaio engine in use, fio will use the
 this flag turned on, the AIO ring will be read directly from user\-space to
 reap events. The reaping mode is only enabled when polling for a minimum of
 0 events (e.g. when `iodepth_batch_complete=0').
+.TP
+.BI (libaio)prio_percent \fR=\fPint
+Set the percentage of reads that will be issued as priority reads by setting
+the priority bit. Non-read I/O is unaffected by ``prio_percent``. This
+option cannot be used with the `prio` or `prioclass` options.
 .TP
 .BI (pvsync2)hipri
 Set RWF_HIPRI on I/O, indicating to the kernel that it's of higher priority
@@ -1996,6 +2046,22 @@ blocksize=8k will write 16 sectors with each command. fio will still
 generate 8k of data for each command butonly the first 512 bytes will
 be used and transferred to the device. The writefua option is ignored
 with this selection.
+.RE
+.RE
+.TP
+.BI (nbd)uri \fR=\fPstr
+Specify the NBD URI of the server to test.
+The string is a standard NBD URI (see
+\fIhttps://github.com/NetworkBlockDevice/nbd/tree/master/doc\fR).
+Example URIs:
+.RS
+.RS
+.TP
+\fInbd://localhost:10809\fR
+.TP
+\fInbd+unix:///?socket=/tmp/socket\fR
+.TP
+\fInbds://tlshost/exportname\fR
 
 .SS "I/O depth"
 .TP
@@ -2308,17 +2374,14 @@ priority class.
 Set the I/O priority value of this job. Linux limits us to a positive value
 between 0 and 7, with 0 being the highest. See man
 \fBionice\fR\|(1). Refer to an appropriate manpage for other operating
-systems since meaning of priority may differ.
+systems since meaning of priority may differ. For per-command priority
+setting, see I/O engine specific `prio_percent` and `hipri_percent`
+options.
 .TP
 .BI prioclass \fR=\fPint
-Set the I/O priority class. See man \fBionice\fR\|(1).
-.TP
-.BI prio_percent \fR=\fPint
-Set the percentage of reads that will be issued as priority reads with the
-priority set by the \fBprioclass\fR and \fBprio\fR options. Non-priority
-reads will be sent with ``prio=0`` and ``prioclass=0``. Non-read I/O is
-unaffected by ``prio_percent``. This option cannot be used with the `prio`
-or `prioclass` options.
+Set the I/O priority class. See man \fBionice\fR\|(1). For per-command
+priority setting, see I/O engine specific `prio_percent` and `hipri_percent`
+options.
 .TP
 .BI cpus_allowed \fR=\fPstr
 Controls the same options as \fBcpumask\fR, but accepts a textual
