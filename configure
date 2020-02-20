@@ -88,14 +88,14 @@ do_cc() {
 }
 
 compile_object() {
-  do_cc $CFLAGS -c -o $TMPO $TMPC
+  do_cc $CFLAGS -Werror-implicit-function-declaration -c -o $TMPO $TMPC
 }
 
 compile_prog() {
   local_cflags="$1"
   local_ldflags="$2 $LIBS"
   echo "Compiling test case $3" >> config.log
-  do_cc $CFLAGS $local_cflags -o $TMPE $TMPC $LDFLAGS $local_ldflags
+  do_cc $CFLAGS -Werror-implicit-function-declaration $local_cflags -o $TMPE $TMPC $LDFLAGS $local_ldflags
 }
 
 feature_not_found() {
@@ -149,6 +149,8 @@ disable_pmem="no"
 disable_native="no"
 march_set="no"
 libiscsi="no"
+libnbd="no"
+libaio_uring="no"
 prefix=/usr/local
 
 # parse options
@@ -207,7 +209,11 @@ for opt do
   ;;
   --enable-libiscsi) libiscsi="yes"
   ;;
+  --enable-libnbd) libnbd="yes"
+  ;;
   --disable-tcmalloc) disable_tcmalloc="yes"
+  ;;
+  --enable-libaio-uring) libaio_uring="yes"
   ;;
   --help)
     show_help="yes"
@@ -245,7 +251,9 @@ if test "$show_help" = "yes" ; then
   echo "--disable-native        Don't build for native host"
   echo "--with-ime=             Install path for DDN's Infinite Memory Engine"
   echo "--enable-libiscsi       Enable iscsi support"
+  echo "--enable-libnbd         Enable libnbd (NBD engine) support"
   echo "--disable-tcmalloc	Disable tcmalloc support"
+  echo "--enable-libaio-uring   Enable libaio emulated over io_uring"
   exit $exit_val
 fi
 
@@ -373,15 +381,11 @@ CYGWIN*)
   # We now take the regular configuration path without having exit 0 here.
   # Flags below are still necessary mostly for MinGW.
   build_static="yes"
-  socklen_t="yes"
   rusage_thread="yes"
   fdatasync="yes"
   clock_gettime="yes" # clock_monotonic probe has dependency on this
   clock_monotonic="yes"
-  gettimeofday="yes"
   sched_idle="yes"
-  tcp_nodelay="yes"
-  ipv6="yes"
   ;;
 esac
 
@@ -599,17 +603,23 @@ int main(void)
   return 0;
 }
 EOF
-  if compile_prog "" "-laio" "libaio" ; then
+  if test "$libaio_uring" = "yes" && compile_prog "" "-luring" "libaio io_uring" ; then
     libaio=yes
+    LIBS="-luring $LIBS"
+  elif compile_prog "" "-laio" "libaio" ; then
+    libaio=yes
+    libaio_uring=no
     LIBS="-laio $LIBS"
   else
     if test "$libaio" = "yes" ; then
       feature_not_found "linux AIO" "libaio-dev or libaio-devel"
     fi
     libaio=no
+    libaio_uring=no
   fi
 fi
 print_config "Linux AIO support" "$libaio"
+print_config "Linux AIO over io_uring" "$libaio_uring"
 
 ##########################################
 # posix aio probe
@@ -689,6 +699,49 @@ if compile_prog "" "$LIBS" "posix_pshared" ; then
   posix_pshared=yes
 fi
 print_config "POSIX pshared support" "$posix_pshared"
+
+##########################################
+# POSIX pthread_condattr_setclock() probe
+if test "$pthread_condattr_setclock" != "yes" ; then
+  pthread_condattr_setclock="no"
+fi
+cat > $TMPC <<EOF
+#include <pthread.h>
+int main(void)
+{
+  pthread_condattr_t condattr;
+  pthread_condattr_setclock(&condattr, CLOCK_MONOTONIC);
+  return 0;
+}
+EOF
+if compile_prog "" "$LIBS" "pthread_condattr_setclock" ; then
+  pthread_condattr_setclock=yes
+elif compile_prog "" "$LIBS -lpthread" "pthread_condattr_setclock" ; then
+  pthread_condattr_setclock=yes
+  LIBS="$LIBS -lpthread"
+fi
+print_config "pthread_condattr_setclock()" "$pthread_condattr_setclock"
+
+##########################################
+# pthread_sigmask() probe
+if test "$pthread_sigmask" != "yes" ; then
+  pthread_sigmask="no"
+fi
+cat > $TMPC <<EOF
+#include <stddef.h> /* NULL */
+#include <signal.h> /* pthread_sigmask() */
+int main(void)
+{
+  return pthread_sigmask(0, NULL, NULL);
+}
+EOF
+if compile_prog "" "$LIBS" "pthread_sigmask" ; then
+  pthread_sigmask=yes
+elif compile_prog "" "$LIBS -lpthread" "pthread_sigmask" ; then
+  pthread_sigmask=yes
+  LIBS="$LIBS -lpthread"
+fi
+print_config "pthread_sigmask()" "$pthread_sigmask"
 
 ##########################################
 # solaris aio probe
@@ -784,7 +837,7 @@ cat > $TMPC << EOF
 int main(int argc, char **argv)
 {
   struct ibv_pd *pd = ibv_alloc_pd(NULL);
-  return 0;
+  return pd != NULL;
 }
 EOF
 if test "$disable_rdma" != "yes" && compile_prog "" "-libverbs" "libverbs" ; then
@@ -1078,6 +1131,59 @@ fi
 print_config "fdatasync" "$fdatasync"
 
 ##########################################
+# pipe() probe
+if test "$pipe" != "yes" ; then
+  pipe="no"
+fi
+cat > $TMPC << EOF
+#include <unistd.h>
+int main(int argc, char **argv)
+{
+  int fd[2];
+  return pipe(fd);
+}
+EOF
+if compile_prog "" "" "pipe"; then
+  pipe="yes"
+fi
+print_config "pipe()" "$pipe"
+
+##########################################
+# pipe2() probe
+if test "$pipe2" != "yes" ; then
+  pipe2="no"
+fi
+cat > $TMPC << EOF
+#include <unistd.h>
+int main(int argc, char **argv)
+{
+  int fd[2];
+  return pipe2(fd, 0);
+}
+EOF
+if compile_prog "" "" "pipe2"; then
+  pipe2="yes"
+fi
+print_config "pipe2()" "$pipe2"
+
+##########################################
+# pread() probe
+if test "$pread" != "yes" ; then
+  pread="no"
+fi
+cat > $TMPC << EOF
+#include <unistd.h>
+int main(int argc, char **argv)
+{
+  return pread(0, NULL, 0, 0);
+}
+EOF
+if compile_prog "" "" "pread"; then
+  pread="yes"
+fi
+print_config "pread()" "$pread"
+
+##########################################
 # sync_file_range() probe
 if test "$sync_file_range" != "yes" ; then
   sync_file_range="no"
@@ -1264,7 +1370,7 @@ cat > $TMPC << EOF
 #include <getopt.h>
 int main(int argc, char **argv)
 {
-  int c = getopt_long_only(argc, argv, NULL, NULL, NULL);
+  int c = getopt_long_only(argc, argv, "", NULL, NULL);
   return c;
 }
 EOF
@@ -1279,8 +1385,12 @@ if test "$inet_aton" != "yes" ; then
   inet_aton="no"
 fi
 cat > $TMPC << EOF
+#ifdef _WIN32
+#include <winsock2.h>
+#else
 #include <sys/socket.h>
 #include <arpa/inet.h>
+#endif
 #include <stdio.h>
 int main(int argc, char **argv)
 {
@@ -1299,7 +1409,12 @@ if test "$socklen_t" != "yes" ; then
   socklen_t="no"
 fi
 cat > $TMPC << EOF
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#else
 #include <sys/socket.h>
+#endif
 int main(int argc, char **argv)
 {
   socklen_t len = 0;
@@ -1423,10 +1538,14 @@ if test "$tcp_nodelay" != "yes" ; then
   tcp_nodelay="no"
 fi
 cat > $TMPC << EOF
+#ifdef _WIN32
+#include <winsock2.h>
+#else
 #include <stdio.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/tcp.h>
+#endif
 int main(int argc, char **argv)
 {
   return getsockopt(0, 0, TCP_NODELAY, NULL, NULL);
@@ -1434,6 +1553,9 @@ int main(int argc, char **argv)
 EOF
 if compile_prog "" "" "TCP_NODELAY"; then
   tcp_nodelay="yes"
+elif compile_prog "" "-lws2_32" "TCP_NODELAY"; then
+  tcp_nodelay="yes"
+  LIBS="$LIBS -lws2_32"
 fi
 print_config "TCP_NODELAY" "$tcp_nodelay"
 
@@ -1443,10 +1565,14 @@ if test "$window_size" != "yes" ; then
   window_size="no"
 fi
 cat > $TMPC << EOF
+#ifdef _WIN32
+#include <winsock2.h>
+#else
 #include <stdio.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/tcp.h>
+#endif
 int main(int argc, char **argv)
 {
   setsockopt(0, SOL_SOCKET, SO_SNDBUF, NULL, 0);
@@ -1455,6 +1581,9 @@ int main(int argc, char **argv)
 EOF
 if compile_prog "" "" "SO_SNDBUF"; then
   window_size="yes"
+elif compile_prog "" "-lws2_32" "SO_SNDBUF"; then
+  window_size="yes"
+  LIBS="$LIBS -lws2_32"
 fi
 print_config "Net engine window_size" "$window_size"
 
@@ -1464,12 +1593,16 @@ if test "$mss" != "yes" ; then
   mss="no"
 fi
 cat > $TMPC << EOF
+#ifdef _WIN32
+#include <winsock2.h>
+#else
 #include <stdio.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#endif
 int main(int argc, char **argv)
 {
   return setsockopt(0, IPPROTO_TCP, TCP_MAXSEG, NULL, 0);
@@ -1477,6 +1610,9 @@ int main(int argc, char **argv)
 EOF
 if compile_prog "" "" "TCP_MAXSEG"; then
   mss="yes"
+elif compile_prog "" "-lws2_32" "TCP_MAXSEG"; then
+  mss="yes"
+  LIBS="$LIBS -lws2_32"
 fi
 print_config "TCP_MAXSEG" "$mss"
 
@@ -1541,10 +1677,15 @@ if test "$ipv6" != "yes" ; then
   ipv6="no"
 fi
 cat > $TMPC << EOF
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#else
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netdb.h>
+#endif
 #include <stdio.h>
 int main(int argc, char **argv)
 {
@@ -2015,6 +2156,23 @@ fi
 print_config "iscsi engine" "$libiscsi"
 
 ##########################################
+# Check if we have libnbd (for NBD support).
+minimum_libnbd=0.9.8
+if test "$libnbd" = "yes" ; then
+  if $(pkg-config --atleast-version=$minimum_libnbd libnbd); then
+    libnbd="yes"
+    libnbd_cflags=$(pkg-config --cflags libnbd)
+    libnbd_libs=$(pkg-config --libs libnbd)
+  else
+    if test "$libnbd" = "yes" ; then
+      echo "libnbd" "Install libnbd >= $minimum_libnbd"
+    fi
+    libnbd="no"
+  fi
+fi
+print_config "NBD engine" "$libnbd"
+
+##########################################
 # Check if we have lex/yacc available
 yacc="no"
 yacc_is_bison="no"
@@ -2286,22 +2444,6 @@ fi
 print_config "cuda" "$cuda"
 
 ##########################################
-# mkdir() probe. mingw apparently has a one-argument mkdir :/
-mkdir_two="no"
-cat > $TMPC << EOF
-#include <sys/stat.h>
-#include <sys/types.h>
-int main(int argc, char **argv)
-{
-  return mkdir("/tmp/bla", 0600);
-}
-EOF
-if compile_prog "" "" "mkdir(a, b)"; then
-  mkdir_two="yes"
-fi
-print_config "mkdir(a, b)" "$mkdir_two"
-
-##########################################
 # check for cc -march=native
 build_native="no"
 cat > $TMPC << EOF
@@ -2428,6 +2570,9 @@ if test "$zlib" = "yes" ; then
 fi
 if test "$libaio" = "yes" ; then
   output_sym "CONFIG_LIBAIO"
+  if test "$libaio_uring" = "yes" ; then
+    output_sym "CONFIG_LIBAIO_URING"
+  fi
 fi
 if test "$posix_aio" = "yes" ; then
   output_sym "CONFIG_POSIXAIO"
@@ -2437,6 +2582,12 @@ if test "$posix_aio_fsync" = "yes" ; then
 fi
 if test "$posix_pshared" = "yes" ; then
   output_sym "CONFIG_PSHARED"
+fi
+if test "$pthread_condattr_setclock" = "yes" ; then
+  output_sym "CONFIG_PTHREAD_CONDATTR_SETCLOCK"
+fi
+if test "$pthread_sigmask" = "yes" ; then
+  output_sym "CONFIG_PTHREAD_SIGMASK"
 fi
 if test "$have_asprintf" = "yes" ; then
     output_sym "CONFIG_HAVE_ASPRINTF"
@@ -2452,6 +2603,15 @@ if test "$posix_fallocate" = "yes" ; then
 fi
 if test "$fdatasync" = "yes" ; then
   output_sym "CONFIG_FDATASYNC"
+fi
+if test "$pipe" = "yes" ; then
+  output_sym "CONFIG_PIPE"
+fi
+if test "$pipe2" = "yes" ; then
+  output_sym "CONFIG_PIPE2"
+fi
+if test "$pread" = "yes" ; then
+  output_sym "CONFIG_PREAD"
 fi
 if test "$sync_file_range" = "yes" ; then
   output_sym "CONFIG_SYNC_FILE_RANGE"
@@ -2671,9 +2831,6 @@ fi
 if test "$cuda" = "yes" ; then
   output_sym "CONFIG_CUDA"
 fi
-if test "$mkdir_two" = "yes" ; then
-  output_sym "CONFIG_HAVE_MKDIR_TWO"
-fi
 if test "$march_set" = "no" && test "$build_native" = "yes" ; then
   output_sym "CONFIG_BUILD_NATIVE"
 fi
@@ -2697,6 +2854,12 @@ if test "$libiscsi" = "yes" ; then
   echo "CONFIG_LIBISCSI=m" >> $config_host_mak
   echo "LIBISCSI_CFLAGS=$libiscsi_cflags" >> $config_host_mak
   echo "LIBISCSI_LIBS=$libiscsi_libs" >> $config_host_mak
+fi
+if test "$libnbd" = "yes" ; then
+  output_sym "CONFIG_LIBNBD"
+  echo "CONFIG_LIBNBD=m" >> $config_host_mak
+  echo "LIBNBD_CFLAGS=$libnbd_cflags" >> $config_host_mak
+  echo "LIBNBD_LIBS=$libnbd_libs" >> $config_host_mak
 fi
 cat > $TMPC << EOF
 int main(int argc, char **argv)

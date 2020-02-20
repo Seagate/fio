@@ -117,7 +117,8 @@ static int fio_iscsi_setup_lun(struct iscsi_info *iscsi_info,
 
 	task = iscsi_readcapacity16_sync(iscsi_lun->iscsi, iscsi_lun->url->lun);
 	if (task == NULL || task->status != SCSI_STATUS_GOOD) {
-		log_err("iscsi: failed to send readcapacity command\n");
+		log_err("iscsi: failed to send readcapacity command: %s\n",
+			iscsi_get_error(iscsi_lun->iscsi));
 		ret = EINVAL;
 		goto out;
 	}
@@ -350,6 +351,9 @@ static int fio_iscsi_getevents(struct thread_data *td, unsigned int min,
 
 		ret = poll(iscsi_info->pfds, iscsi_info->nr_luns, -1);
 		if (ret < 0) {
+			if (errno == EINTR || errno == EAGAIN) {
+				continue;
+			}
 			log_err("iscsi: failed to poll events: %s.\n",
 				strerror(errno));
 			break;

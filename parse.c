@@ -373,12 +373,16 @@ int str_to_decimal(const char *str, long long *val, int kilo, void *data,
 #endif
 
 	if (rc == 1) {
+		char *endptr;
+
 		if (strstr(str, "0x") || strstr(str, "0X"))
 			base = 16;
 		else
 			base = 10;
 
-		*val = strtoll(str, NULL, base);
+		*val = strtoll(str, &endptr, base);
+		if (*val == 0 && endptr == str)
+			return 1;
 		if (*val == LONG_MAX && errno == ERANGE)
 			return 1;
 	}
@@ -602,8 +606,7 @@ static int __handle_option(const struct fio_option *o, const char *ptr,
 		if (!is_time && o->is_time)
 			is_time = o->is_time;
 
-		tmp[sizeof(tmp) - 1] = '\0';
-		strncpy(tmp, ptr, sizeof(tmp) - 1);
+		snprintf(tmp, sizeof(tmp), "%s", ptr);
 		p = strchr(tmp, ',');
 		if (p)
 			*p = '\0';
@@ -829,8 +832,7 @@ static int __handle_option(const struct fio_option *o, const char *ptr,
 		char tmp[128];
 		char *p1, *p2;
 
-		tmp[sizeof(tmp) - 1] = '\0';
-		strncpy(tmp, ptr, sizeof(tmp) - 1);
+		snprintf(tmp, sizeof(tmp), "%s", ptr);
 
 		/* Handle bsrange with separate read,write values: */
 		p1 = strchr(tmp, ',');
@@ -1046,7 +1048,20 @@ struct fio_option *find_option(struct fio_option *options, const char *opt)
 const struct fio_option *
 find_option_c(const struct fio_option *options, const char *opt)
 {
-	return find_option((struct fio_option *)options, opt);
+	const struct fio_option *o;
+
+	for (o = &options[0]; o->name; o++) {
+		if (!o_match(o, opt))
+			continue;
+		if (o->type == FIO_OPT_UNSUPPORTED) {
+			log_err("Option <%s>: %s\n", o->name, o->help);
+			continue;
+		}
+
+		return o;
+	}
+
+	return NULL;
 }
 
 static const struct fio_option *

@@ -1235,7 +1235,8 @@ int set_name_idx(char *target, size_t tlen, char *input, int index,
 		len = snprintf(target, tlen, "%s/%s.", fname,
 				client_sockaddr_str);
 	} else
-		len = snprintf(target, tlen, "%s/", fname);
+		len = snprintf(target, tlen, "%s%c", fname,
+				FIO_OS_PATH_SEPARATOR);
 
 	target[tlen - 1] = '\0';
 	free(p);
@@ -1407,13 +1408,20 @@ static int str_gtod_reduce_cb(void *data, int *il)
 	struct thread_data *td = cb_data_to_td(data);
 	int val = *il;
 
-	td->o.disable_lat = !!val;
-	td->o.disable_clat = !!val;
-	td->o.disable_slat = !!val;
-	td->o.disable_bw = !!val;
-	td->o.clat_percentiles = !val;
-	if (val)
+	/*
+	 * Only modfiy options if gtod_reduce==1
+	 * Otherwise leave settings alone.
+	 */
+	if (val) {
+		td->o.disable_lat = 1;
+		td->o.disable_clat = 1;
+		td->o.disable_slat = 1;
+		td->o.disable_bw = 1;
+		td->o.clat_percentiles = 0;
+		td->o.lat_percentiles = 0;
+		td->o.slat_percentiles = 0;
 		td->ts_cache_mask = 63;
+	}
 
 	return 0;
 }
@@ -1430,6 +1438,22 @@ static int str_offset_cb(void *data, unsigned long long *__val)
 					td->o.start_offset_percent);
 	} else
 		td->o.start_offset = v;
+
+	return 0;
+}
+
+static int str_offset_increment_cb(void *data, unsigned long long *__val)
+{
+	struct thread_data *td = cb_data_to_td(data);
+	unsigned long long v = *__val;
+
+	if (parse_is_percent(v)) {
+		td->o.offset_increment = 0;
+		td->o.offset_increment_percent = -1ULL - v;
+		dprint(FD_PARSE, "SET offset_increment_percent %d\n",
+					td->o.offset_increment_percent);
+	} else
+		td->o.offset_increment = v;
 
 	return 0;
 }
@@ -1899,6 +1923,9 @@ struct fio_option fio_options[FIO_MAX_OPTS] = {
 			    .help = "HTTP (WebDAV/S3) IO engine",
 			  },
 #endif
+			  { .ival = "nbd",
+			    .help = "Network Block Device (NBD) IO engine"
+			  },
 		},
 	},
 	{
@@ -2081,6 +2108,7 @@ struct fio_option fio_options[FIO_MAX_OPTS] = {
 		.name	= "offset_increment",
 		.lname	= "IO offset increment",
 		.type	= FIO_OPT_STR_VAL,
+		.cb	= str_offset_increment_cb,
 		.off1	= offsetof(struct thread_options, offset_increment),
 		.help	= "What is the increment from one offset to the next",
 		.parent = "offset",
@@ -2392,14 +2420,17 @@ struct fio_option fio_options[FIO_MAX_OPTS] = {
 		.parent = "nrfiles",
 		.hide	= 1,
 	},
-#ifdef FIO_HAVE_ANY_FALLOCATE
 	{
 		.name	= "fallocate",
 		.lname	= "Fallocate",
 		.type	= FIO_OPT_STR,
 		.off1	= offsetof(struct thread_options, fallocate_mode),
 		.help	= "Whether pre-allocation is performed when laying out files",
+#ifdef FIO_HAVE_DEFAULT_FALLOCATE
 		.def	= "native",
+#else
+		.def	= "none",
+#endif
 		.category = FIO_OPT_C_FILE,
 		.group	= FIO_OPT_G_INVALID,
 		.posval	= {
@@ -2423,6 +2454,10 @@ struct fio_option fio_options[FIO_MAX_OPTS] = {
 			    .help = "Use fallocate(..., FALLOC_FL_KEEP_SIZE, ...)",
 			  },
 #endif
+			  { .ival = "truncate",
+			    .oval = FIO_FALLOCATE_TRUNCATE,
+			    .help = "Truncate file to final size instead of allocating"
+			  },
 			  /* Compatibility with former boolean values */
 			  { .ival = "0",
 			    .oval = FIO_FALLOCATE_NONE,
@@ -2436,14 +2471,6 @@ struct fio_option fio_options[FIO_MAX_OPTS] = {
 #endif
 		},
 	},
-#else	/* FIO_HAVE_ANY_FALLOCATE */
-	{
-		.name	= "fallocate",
-		.lname	= "Fallocate",
-		.type	= FIO_OPT_UNSUPPORTED,
-		.help	= "Your platform does not support fallocate",
-	},
-#endif /* FIO_HAVE_ANY_FALLOCATE */
 	{
 		.name	= "fadvise_hint",
 		.lname	= "Fadvise hint",
@@ -3928,6 +3955,30 @@ struct fio_option fio_options[FIO_MAX_OPTS] = {
 		.group	= FIO_OPT_G_PROCESS,
 	},
 	{
+		.name	= "exit_what",
+		.lname	= "What jobs to quit on terminate",
+		.type	= FIO_OPT_STR,
+		.off1	= offsetof(struct thread_options, exit_what),
+		.help	= "Fine-grained control for exitall",
+		.def	= "group",
+		.category = FIO_OPT_C_GENERAL,
+		.group	= FIO_OPT_G_PROCESS,
+		.posval	= {
+			  { .ival = "group",
+			    .oval = TERMINATE_GROUP,
+			    .help = "exit_all=1 default behaviour",
+			  },
+			  { .ival = "stonewall",
+			    .oval = TERMINATE_STONEWALL,
+			    .help = "quit all currently running jobs; continue with next stonewall",
+			  },
+			  { .ival = "all",
+			    .oval = TERMINATE_ALL,
+			    .help = "Quit everything",
+			  },
+		},
+	},
+	{
 		.name	= "exitall_on_error",
 		.lname	= "Exit-all on terminate in error",
 		.type	= FIO_OPT_STR_SET,
@@ -4274,7 +4325,6 @@ struct fio_option fio_options[FIO_MAX_OPTS] = {
 		.off1	= offsetof(struct thread_options, clat_percentiles),
 		.help	= "Enable the reporting of completion latency percentiles",
 		.def	= "1",
-		.inverse = "lat_percentiles",
 		.category = FIO_OPT_C_STAT,
 		.group	= FIO_OPT_G_INVALID,
 	},
@@ -4285,7 +4335,16 @@ struct fio_option fio_options[FIO_MAX_OPTS] = {
 		.off1	= offsetof(struct thread_options, lat_percentiles),
 		.help	= "Enable the reporting of IO latency percentiles",
 		.def	= "0",
-		.inverse = "clat_percentiles",
+		.category = FIO_OPT_C_STAT,
+		.group	= FIO_OPT_G_INVALID,
+	},
+	{
+		.name	= "slat_percentiles",
+		.lname	= "Submission latency percentiles",
+		.type	= FIO_OPT_BOOL,
+		.off1	= offsetof(struct thread_options, slat_percentiles),
+		.help	= "Enable the reporting of submission latency percentiles",
+		.def	= "0",
 		.category = FIO_OPT_C_STAT,
 		.group	= FIO_OPT_G_INVALID,
 	},
@@ -4905,8 +4964,7 @@ char *fio_option_dup_subs(const char *opt)
 		return NULL;
 	}
 
-	in[OPT_LEN_MAX] = '\0';
-	strncpy(in, opt, OPT_LEN_MAX);
+	snprintf(in, sizeof(in), "%s", opt);
 
 	while (*inptr && nchr > 0) {
 		if (inptr[0] == '$' && inptr[1] == '{') {

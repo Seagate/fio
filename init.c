@@ -32,6 +32,7 @@
 #include "steadystate.h"
 #include "blktrace.h"
 
+#include "oslib/asprintf.h"
 #include "oslib/getopt.h"
 #include "oslib/strcasestr.h"
 
@@ -852,11 +853,6 @@ static int fixup_options(struct thread_data *td)
 			o->unit_base = N2S_BYTEPERSEC;
 	}
 
-#ifndef FIO_HAVE_ANY_FALLOCATE
-	/* Platform doesn't support any fallocate so force it to none */
-	o->fallocate_mode = FIO_FALLOCATE_NONE;
-#endif
-
 #ifndef CONFIG_FDATASYNC
 	if (o->fdatasync_blocks) {
 		log_info("fio: this platform does not support fdatasync()"
@@ -948,24 +944,12 @@ static int fixup_options(struct thread_data *td)
 		ret |= 1;
 	}
 
-	if (fio_option_is_set(o, clat_percentiles) &&
-	    !fio_option_is_set(o, lat_percentiles)) {
-		o->lat_percentiles = !o->clat_percentiles;
-	} else if (fio_option_is_set(o, lat_percentiles) &&
-		   !fio_option_is_set(o, clat_percentiles)) {
-		o->clat_percentiles = !o->lat_percentiles;
-	} else if (fio_option_is_set(o, lat_percentiles) &&
-		   fio_option_is_set(o, clat_percentiles) &&
-		   o->lat_percentiles && o->clat_percentiles) {
-		log_err("fio: lat_percentiles and clat_percentiles are "
-			"mutually exclusive\n");
-		ret |= 1;
-	}
-
 	if (o->disable_lat)
 		o->lat_percentiles = 0;
 	if (o->disable_clat)
 		o->clat_percentiles = 0;
+	if (o->disable_slat)
+		o->slat_percentiles = 0;
 
 	/*
 	 * Fix these up to be nsec internally
@@ -1046,6 +1030,7 @@ static void td_fill_rand_seeds_internal(struct thread_data *td, bool use64)
 	init_rand_seed(&td->poisson_state[2], td->rand_seeds[FIO_RAND_POISSON3_OFF], 0);
 	init_rand_seed(&td->dedupe_state, td->rand_seeds[FIO_DEDUPE_OFF], false);
 	init_rand_seed(&td->zone_state, td->rand_seeds[FIO_RAND_ZONE_OFF], false);
+	init_rand_seed(&td->prio_state, td->rand_seeds[FIO_RAND_PRIO_CMDS], false);
 
 	if (!td_random(td))
 		return;
@@ -1273,8 +1258,7 @@ static char *make_filename(char *buf, size_t buf_size,struct thread_options *o,
 	for (f = &fpre_keywords[0]; f->keyword; f++)
 		f->strlen = strlen(f->keyword);
 
-	buf[buf_size - 1] = '\0';
-	strncpy(buf, o->filename_format, buf_size - 1);
+	snprintf(buf, buf_size, "%s", o->filename_format);
 
 	memset(copy, 0, sizeof(copy));
 	for (f = &fpre_keywords[0]; f->keyword; f++) {
@@ -1353,7 +1337,7 @@ static char *make_filename(char *buf, size_t buf_size,struct thread_options *o,
 			if (post_start)
 				strncpy(dst, buf + post_start, dst_left);
 
-			strncpy(buf, copy, buf_size - 1);
+			snprintf(buf, buf_size, "%s", copy);
 		} while (1);
 	}
 
@@ -1513,18 +1497,19 @@ static int add_job(struct thread_data *td, const char *jobname, int job_add_num,
 
 	td->ts.clat_percentiles = o->clat_percentiles;
 	td->ts.lat_percentiles = o->lat_percentiles;
+	td->ts.slat_percentiles = o->slat_percentiles;
 	td->ts.percentile_precision = o->percentile_precision;
 	memcpy(td->ts.percentile_list, o->percentile_list, sizeof(o->percentile_list));
 	td->ts.sig_figs = o->sig_figs;
 
-	td->ts.clat_high_prio_stat.min_val = ULONG_MAX;
-	td->ts.clat_prio_stat.min_val = ULONG_MAX;
 	for (i = 0; i < DDIR_RWDIR_CNT; i++) {
 		td->ts.clat_stat[i].min_val = ULONG_MAX;
 		td->ts.slat_stat[i].min_val = ULONG_MAX;
 		td->ts.lat_stat[i].min_val = ULONG_MAX;
 		td->ts.bw_stat[i].min_val = ULONG_MAX;
 		td->ts.iops_stat[i].min_val = ULONG_MAX;
+		td->ts.clat_high_prio_stat[i].min_val = ULONG_MAX;
+		td->ts.clat_low_prio_stat[i].min_val = ULONG_MAX;
 	}
 	td->ts.sync_stat.min_val = ULONG_MAX;
 	td->ddir_seq_nr = o->ddir_seq_nr;
@@ -2031,20 +2016,12 @@ static int __parse_jobs_ini(struct thread_data *td,
 				 */
 				if (access(filename, F_OK) &&
 				    (ts = strrchr(file, '/'))) {
-					int len = ts - file +
-						strlen(filename) + 2;
-
-					if (!(full_fn = calloc(1, len))) {
+					if (asprintf(&full_fn, "%.*s%s",
+						 (int)(ts - file + 1), file,
+						 filename) < 0) {
 						ret = ENOMEM;
 						break;
 					}
-
-					strncpy(full_fn,
-						file, (ts - file) + 1);
-					strncpy(full_fn + (ts - file) + 1,
-						filename,
-						len - (ts - file) - 1);
-					full_fn[len - 1] = 0;
 					filename = full_fn;
 				}
 

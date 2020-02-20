@@ -22,11 +22,6 @@
 
 #include "windows/posix.h"
 
-/* MinGW won't declare rand_r unless _POSIX is defined */
-#if defined(WIN32) && !defined(rand_r)
-int rand_r(unsigned *);
-#endif
-
 #ifndef PTHREAD_STACK_MIN
 #define PTHREAD_STACK_MIN 65535
 #endif
@@ -35,6 +30,7 @@ int rand_r(unsigned *);
 #define FIO_HAVE_CPU_AFFINITY
 #define FIO_HAVE_CHARDEV_SIZE
 #define FIO_HAVE_GETTID
+#define FIO_EMULATED_MKDIR_TWO
 
 #define FIO_PREFERRED_ENGINE		"windowsaio"
 #define FIO_PREFERRED_CLOCK_SOURCE	CS_CGETTIME
@@ -197,10 +193,40 @@ static inline int fio_set_sched_idle(void)
 	return (SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_IDLE))? 0 : -1;
 }
 
+static inline int fio_mkdir(const char *path, mode_t mode) {
+	DWORD dwAttr = GetFileAttributesA(path);
+
+	if (dwAttr != INVALID_FILE_ATTRIBUTES &&
+	    (dwAttr & FILE_ATTRIBUTE_DIRECTORY)) {
+		errno = EEXIST;
+		return -1;
+	}
+
+	if (CreateDirectoryA(path, NULL) == 0) {
+		log_err("CreateDirectoryA = %d\n", GetLastError());
+		errno = win_to_posix_error(GetLastError());
+		return -1;
+	}
+
+	return 0;
+}
+
 #ifdef CONFIG_WINDOWS_XP
 #include "os-windows-xp.h"
 #else
+#define FIO_HAVE_CPU_ONLINE_SYSCONF
+unsigned int cpus_online(void);
 #include "os-windows-7.h"
 #endif
+
+int first_set_cpu(os_cpu_mask_t *cpumask);
+int fio_setaffinity(int pid, os_cpu_mask_t cpumask);
+int fio_cpuset_init(os_cpu_mask_t *mask);
+int fio_getaffinity(int pid, os_cpu_mask_t *mask);
+void fio_cpu_clear(os_cpu_mask_t *mask, int cpu);
+void fio_cpu_set(os_cpu_mask_t *mask, int cpu);
+int fio_cpu_isset(os_cpu_mask_t *mask, int cpu);
+int fio_cpu_count(os_cpu_mask_t *mask);
+int fio_cpuset_exit(os_cpu_mask_t *mask);
 
 #endif /* FIO_OS_WINDOWS_H */

@@ -81,7 +81,7 @@ static void sig_int(int sig)
 			exit_value = 128;
 		}
 
-		fio_terminate_threads(TERMINATE_ALL);
+		fio_terminate_threads(TERMINATE_ALL, TERMINATE_ALL);
 	}
 }
 
@@ -281,6 +281,7 @@ static bool fio_io_sync(struct thread_data *td, struct fio_file *f)
 
 	io_u->ddir = DDIR_SYNC;
 	io_u->file = f;
+	io_u_set(td, io_u, IO_U_F_NO_FILE_PUT);
 
 	if (td_io_prep(td, io_u)) {
 		put_io_u(td, io_u);
@@ -314,7 +315,7 @@ requeue:
 
 static int fio_file_fsync(struct thread_data *td, struct fio_file *f)
 {
-	int ret;
+	int ret, ret2;
 
 	if (fio_file_open(f))
 		return fio_io_sync(td, f);
@@ -323,8 +324,10 @@ static int fio_file_fsync(struct thread_data *td, struct fio_file *f)
 		return 1;
 
 	ret = fio_io_sync(td, f);
-	td_io_close_file(td, f);
-	return ret;
+	ret2 = 0;
+	if (fio_file_open(f))
+		ret2 = td_io_close_file(td, f);
+	return (ret || ret2);
 }
 
 static inline void __update_ts_cache(struct thread_data *td)
@@ -1088,7 +1091,7 @@ reap:
 		if (!in_ramp_time(td) && should_check_rate(td)) {
 			if (check_min_rate(td, &comp_time)) {
 				if (exitall_on_terminate || td->o.exitall_error)
-					fio_terminate_threads(td->groupid);
+					fio_terminate_threads(td->groupid, td->o.exit_what);
 				td_verror(td, EIO, "check_min_rate");
 				break;
 			}
@@ -1124,7 +1127,7 @@ reap:
 				td->error = 0;
 		}
 
-		if (should_fsync(td) && td->o.end_fsync) {
+		if (should_fsync(td) && (td->o.end_fsync || td->o.fsync_on_close)) {
 			td_set_runstate(td, TD_FSYNCING);
 
 			for_each_file(td, f, i) {
@@ -1233,7 +1236,7 @@ static int init_io_u(struct thread_data *td)
 		ptr = fio_memalign(cl_align, sizeof(*io_u), td_offload_overlap(td));
 		if (!ptr) {
 			log_err("fio: unable to allocate aligned memory\n");
-			break;
+			return 1;
 		}
 
 		io_u = ptr;
@@ -1466,12 +1469,12 @@ static bool keep_running(struct thread_data *td)
 
 static int exec_string(struct thread_options *o, const char *string, const char *mode)
 {
-	size_t newlen = strlen(string) + strlen(o->name) + strlen(mode) + 9 + 1;
+	size_t newlen = strlen(string) + strlen(o->name) + strlen(mode) + 13 + 1;
 	int ret;
 	char *str;
 
 	str = malloc(newlen);
-	sprintf(str, "%s &> %s.%s.txt", string, o->name, mode);
+	sprintf(str, "%s > %s.%s.txt 2>&1", string, o->name, mode);
 
 	log_info("%s : Saving output of %s in %s.%s.txt\n",o->name, mode, o->name, mode);
 	ret = system(str);
@@ -1895,7 +1898,7 @@ static void *thread_main(void *data)
 		exec_string(o, o->exec_postrun, (const char *)"postrun");
 
 	if (exitall_on_terminate || (o->exitall_error && td->error))
-		fio_terminate_threads(td->groupid);
+		fio_terminate_threads(td->groupid, td->o.exit_what);
 
 err:
 	if (td->error)
@@ -2047,7 +2050,7 @@ reaped:
 	}
 
 	if (*nr_running == cputhreads && !pending && realthreads)
-		fio_terminate_threads(TERMINATE_ALL);
+		fio_terminate_threads(TERMINATE_ALL, TERMINATE_ALL);
 }
 
 static bool __check_trigger_file(void)
@@ -2097,7 +2100,7 @@ void check_trigger_file(void)
 			fio_clients_send_trigger(trigger_remote_cmd);
 		else {
 			verify_save_state(IO_LIST_ALL);
-			fio_terminate_threads(TERMINATE_ALL);
+			fio_terminate_threads(TERMINATE_ALL, TERMINATE_ALL);
 			exec_trigger(trigger_cmd);
 		}
 	}
@@ -2117,8 +2120,16 @@ static int fio_verify_load_state(struct thread_data *td)
 					td->thread_number - 1, &data);
 		if (!ret)
 			verify_assign_state(td, data);
-	} else
-		ret = verify_load_state(td, "local");
+	} else {
+		char prefix[PATH_MAX];
+
+		if (aux_path)
+			sprintf(prefix, "%s%clocal", aux_path,
+					FIO_OS_PATH_SEPARATOR);
+		else
+			strcpy(prefix, "local");
+		ret = verify_load_state(td, prefix);
+	}
 
 	return ret;
 }
@@ -2370,7 +2381,7 @@ reap:
 			dprint(FD_MUTEX, "wait on startup_sem\n");
 			if (fio_sem_down_timeout(startup_sem, 10000)) {
 				log_err("fio: job startup hung? exiting.\n");
-				fio_terminate_threads(TERMINATE_ALL);
+				fio_terminate_threads(TERMINATE_ALL, TERMINATE_ALL);
 				fio_abort = true;
 				nr_started--;
 				free(fd);
@@ -2492,7 +2503,8 @@ int fio_backend(struct sk_out *sk_out)
 
 	set_genesis_time();
 	stat_init();
-	helper_thread_create(startup_sem, sk_out);
+	if (helper_thread_create(startup_sem, sk_out))
+		log_err("fio: failed to create helper thread\n");
 
 	cgroup_list = smalloc(sizeof(*cgroup_list));
 	if (cgroup_list)

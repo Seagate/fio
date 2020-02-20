@@ -121,19 +121,15 @@ static struct ioengine_ops *dlopen_ioengine(struct thread_data *td,
 	return ops;
 }
 
-static struct ioengine_ops *__load_ioengine(const char *name)
+static struct ioengine_ops *__load_ioengine(const char *engine)
 {
-	char engine[64];
-
-	engine[sizeof(engine) - 1] = '\0';
-	strncpy(engine, name, sizeof(engine) - 1);
-
 	/*
 	 * linux libaio has alias names, so convert to what we want
 	 */
 	if (!strncmp(engine, "linuxaio", 8)) {
-		dprint(FD_IO, "converting ioengine name: %s -> libaio\n", name);
-		strcpy(engine, "libaio");
+		dprint(FD_IO, "converting ioengine name: %s -> libaio\n",
+		       engine);
+		engine = "libaio";
 	}
 
 	dprint(FD_IO, "load ioengine %s\n", engine);
@@ -378,14 +374,16 @@ enum fio_q_status td_io_queue(struct thread_data *td, struct io_u *io_u)
 	}
 
 	if (ret == FIO_Q_COMPLETED) {
-		if (ddir_rw(io_u->ddir) || ddir_sync(io_u->ddir)) {
+		if (ddir_rw(io_u->ddir) ||
+		    (ddir_sync(io_u->ddir) && td->runstate != TD_FSYNCING)) {
 			io_u_mark_depth(td, 1);
 			td->ts.total_io_u[io_u->ddir]++;
 		}
 	} else if (ret == FIO_Q_QUEUED) {
 		td->io_u_queued++;
 
-		if (ddir_rw(io_u->ddir) || ddir_sync(io_u->ddir))
+		if (ddir_rw(io_u->ddir) ||
+		    (ddir_sync(io_u->ddir) && td->runstate != TD_FSYNCING))
 			td->ts.total_io_u[io_u->ddir]++;
 
 		if (td->io_u_queued >= td->o.iodepth_batch)

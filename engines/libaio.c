@@ -16,12 +16,9 @@
 #include "../optgroup.h"
 #include "../lib/memalign.h"
 
-#ifndef IOCB_FLAG_HIPRI
-#define IOCB_FLAG_HIPRI	(1 << 2)
-#endif
-
-#ifndef IOCTX_FLAG_IOPOLL
-#define IOCTX_FLAG_IOPOLL	(1 << 0)
+/* Should be defined in newest aio_abi.h */
+#ifndef IOCB_FLAG_IOPRIO
+#define IOCB_FLAG_IOPRIO    (1 << 1)
 #endif
 
 /* Should be defined in newest aio_abi.h */
@@ -67,8 +64,7 @@ struct libaio_data {
 struct libaio_options {
 	void *pad;
 	unsigned int userspace_reap;
-	unsigned int prio_percent;
-	unsigned int hipri;
+	unsigned int cmdprio_percentage;
 };
 
 static struct fio_option options[] = {
@@ -82,14 +78,11 @@ static struct fio_option options[] = {
 		.group	= FIO_OPT_G_LIBAIO,
 	},
 #ifdef FIO_HAVE_IOPRIO_CLASS
-#ifndef FIO_HAVE_IOPRIO
-#error "FIO_HAVE_IOPRIO_CLASS requires FIO_HAVE_IOPRIO"
-#endif
 	{
-		.name	= "prio_percent",
-		.lname	= "prio percentage",
+		.name	= "cmdprio_percentage",
+		.lname	= "high priority percentage",
 		.type	= FIO_OPT_INT,
-		.off1	= offsetof(struct libaio_options, prio_percent),
+		.off1	= offsetof(struct libaio_options, cmdprio_percentage),
 		.minval	= 1,
 		.maxval	= 100,
 		.help	= "Send high priority I/O this percentage of the time",
@@ -98,21 +91,12 @@ static struct fio_option options[] = {
 	},
 #else
 	{
-		.name	= "prio_percent",
-		.lname	= "prio percentage",
+		.name	= "cmdprio_percentage",
+		.lname	= "high priority percentage",
 		.type	= FIO_OPT_UNSUPPORTED,
 		.help	= "Your platform does not support I/O priority classes",
 	},
 #endif
-	{
-		.name	= "hipri",
-		.lname	= "High Priority",
-		.type	= FIO_OPT_STR_SET,
-		.off1	= offsetof(struct libaio_options, hipri),
-		.help	= "Use polled IO completions",
-		.category = FIO_OPT_C_ENGINE,
-		.group	= FIO_OPT_G_LIBAIO,
-	},
 	{
 		.name	= NULL,
 	},
@@ -130,19 +114,12 @@ static inline void ring_inc(struct libaio_data *ld, unsigned int *val,
 static int fio_libaio_prep(struct thread_data fio_unused *td, struct io_u *io_u)
 {
 	struct fio_file *f = io_u->file;
-	struct libaio_options *o = td->eo;
-	struct iocb *iocb;
-
-	iocb = &io_u->iocb;
+	struct iocb *iocb = &io_u->iocb;
 
 	if (io_u->ddir == DDIR_READ) {
 		io_prep_pread(iocb, f->fd, io_u->xfer_buf, io_u->xfer_buflen, io_u->offset);
-		if (o->hipri)
-			iocb->u.c.flags |= IOCB_FLAG_HIPRI;
 	} else if (io_u->ddir == DDIR_WRITE) {
 		io_prep_pwrite(iocb, f->fd, io_u->xfer_buf, io_u->xfer_buflen, io_u->offset);
-		if (o->hipri)
-			iocb->u.c.flags |= IOCB_FLAG_HIPRI;
 	} else if (ddir_sync(io_u->ddir))
 		io_prep_fsync(iocb, f->fd);
 
@@ -152,18 +129,11 @@ static int fio_libaio_prep(struct thread_data fio_unused *td, struct io_u *io_u)
 static void fio_libaio_prio_prep(struct thread_data *td, struct io_u *io_u)
 {
 	struct libaio_options *o = td->eo;
-	struct libaio_data *ld = td->io_ops_data;
-	if (o->prio_percent == 0)
-		return;
-	if (rand_between(&ld->prio_state, 0, 99) < o->prio_percent) {
-		dprint(FD_IO, "Enable PRIO \n");
-		io_u->iocb.aio_reqprio = IOPRIO_CLASS_RT << IOPRIO_CLASS_SHIFT | td->o.ioprio;
+	/* io_u flags will be reset with other flags in __get_io_u() */
+	if (rand_between(&td->prio_state, 0, 99) < o->cmdprio_percentage) {
+		io_u->iocb.aio_reqprio = IOPRIO_CLASS_RT << IOPRIO_CLASS_SHIFT;
 		io_u->iocb.u.c.flags |= IOCB_FLAG_IOPRIO;
-		io_u->priority_bit = 1;
-	} else {
-		dprint(FD_IO, "Disable PRIO \n");
-		io_u->iocb.u.c.flags &= ~IOCB_FLAG_IOPRIO;
-		io_u->priority_bit = 0;
+		io_u->flags |= IO_U_F_PRIORITY;
 	}
 	return;
 }
@@ -271,6 +241,7 @@ static enum fio_q_status fio_libaio_queue(struct thread_data *td,
 					  struct io_u *io_u)
 {
 	struct libaio_data *ld = td->io_ops_data;
+	struct libaio_options *o = td->eo;
 
 	fio_ro_check(td, io_u);
 
@@ -301,7 +272,8 @@ static enum fio_q_status fio_libaio_queue(struct thread_data *td,
 		return FIO_Q_COMPLETED;
 	}
 
-	fio_libaio_prio_prep(td, io_u);
+	if (o->cmdprio_percentage)
+		fio_libaio_prio_prep(td, io_u);
 
 	ld->iocbs[ld->head] = &io_u->iocb;
 	ld->io_us[ld->head] = io_u;
@@ -428,42 +400,12 @@ static void fio_libaio_cleanup(struct thread_data *td)
 	}
 }
 
-static int fio_libaio_old_queue_init(struct libaio_data *ld, unsigned int depth,
-				     bool hipri)
-{
-	if (hipri) {
-		log_err("fio: polled aio not available on your platform\n");
-		return 1;
-	}
-
-	return io_queue_init(depth, &ld->aio_ctx);
-}
-
-static int fio_libaio_queue_init(struct libaio_data *ld, unsigned int depth,
-				 bool hipri)
-{
-#ifdef __NR_sys_io_setup2
-	int ret, flags = 0;
-
-	if (hipri)
-		flags |= IOCTX_FLAG_IOPOLL;
-
-	ret = syscall(__NR_sys_io_setup2, depth, flags, NULL, NULL,
-			&ld->aio_ctx);
-	if (!ret)
-		return 0;
-	/* fall through to old syscall */
-#endif
-	return fio_libaio_old_queue_init(ld, depth, hipri);
-}
-
 static int fio_libaio_post_init(struct thread_data *td)
 {
 	struct libaio_data *ld = td->io_ops_data;
-	struct libaio_options *o = td->eo;
-	int err = 0;
+	int err;
 
-	err = fio_libaio_queue_init(ld, td->o.iodepth, o->hipri);
+	err = io_queue_init(td->o.iodepth, &ld->aio_ctx);
 	if (err) {
 		td_verror(td, -err, "io_queue_init");
 		return 1;
@@ -488,17 +430,11 @@ static int fio_libaio_init(struct thread_data *td)
 
 	td->io_ops_data = ld;
 	/*
-	 * Initialize prio_percent mechanisms if relevant
+	 * Check for option conflicts
 	 */
-	if (!(fio_option_is_set(to, ioprio) ||
-			fio_option_is_set(to, ioprio_class) ||
-			(o->prio_percent == 0))) {
-		ld->prio_seed = FIO_RANDSEED * td->thread_number
-				+ FIO_RAND_NR_OFFS;
-		init_rand_seed(&ld->prio_state, ld->prio_seed, false);
-	}
-	else if (o->prio_percent != 0) {
-		log_err("%s: prio_percent option and mutually exclusive "
+	if ((fio_option_is_set(to, ioprio) || fio_option_is_set(to, ioprio_class)) &&
+			o->cmdprio_percentage != 0) {
+		log_err("%s: cmdprio_percentage option and mutually exclusive "
 				"prio or prioclass option is set, exiting\n", to->name);
 		td_verror(td, EINVAL, "fio_libaio_init");
 		return 1;

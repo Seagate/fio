@@ -765,8 +765,8 @@ Target file/device
 	`filename` semantic (which generates a file for each clone if not
 	specified, but lets all clones use the same file if set).
 
-	See the :option:`filename` option for information on how to escape "``:``" and
-	"``\``" characters within the directory path itself.
+	See the :option:`filename` option for information on how to escape "``:``"
+	characters within the directory path itself.
 
 	Note: To control the directory fio will use for internal state files
 	use :option:`--aux-path`.
@@ -785,10 +785,10 @@ Target file/device
 	by this option will be :option:`size` divided by number of files unless an
 	explicit size is specified by :option:`filesize`.
 
-	Each colon and backslash in the wanted path must be escaped with a ``\``
+	Each colon in the wanted path must be escaped with a ``\``
 	character.  For instance, if the path is :file:`/dev/dsk/foo@3,0:c` then you
 	would use ``filename=/dev/dsk/foo@3,0\:c`` and if the path is
-	:file:`F:\\filename` then you would use ``filename=F\:\\filename``.
+	:file:`F:\\filename` then you would use ``filename=F\:\filename``.
 
 	On Windows, disk devices are accessed as :file:`\\\\.\\PhysicalDrive0` for
 	the first device, :file:`\\\\.\\PhysicalDrive1` for the second etc.
@@ -1173,6 +1173,10 @@ I/O type
 			Pre-allocate via :manpage:`fallocate(2)` with
 			FALLOC_FL_KEEP_SIZE set.
 
+		**truncate**
+			Extend file to final size via :manpage:`ftruncate(2)`
+			instead of allocating.
+
 		**0**
 			Backward-compatible alias for **none**.
 
@@ -1182,7 +1186,15 @@ I/O type
 	May not be available on all supported platforms. **keep** is only available
 	on Linux. If using ZFS on Solaris this cannot be set to **posix**
 	because ZFS doesn't support pre-allocation. Default: **native** if any
-	pre-allocation methods are available, **none** if not.
+	pre-allocation methods except **truncate** are available, **none** if not.
+
+	Note that using **truncate** on Windows will interact surprisingly
+	with non-sequential write patterns. When writing to a file that has
+	been extended by setting the end-of-file information, Windows will
+	backfill the unwritten portion of the file up to that offset with
+	zeroes before issuing the new write. This means that a single small
+	write to the end of an extended file will stall until the entire
+	file has been filled with zeroes.
 
 .. option:: fadvise_hint=str
 
@@ -1279,7 +1291,7 @@ I/O type
 .. option:: fdatasync=int
 
 	Like :option:`fsync` but uses :manpage:`fdatasync(2)` to only sync data and
-	not metadata blocks.  In Windows, FreeBSD, and DragonFlyBSD there is no
+	not metadata blocks. In Windows, FreeBSD, DragonFlyBSD or OSX there is no
 	:manpage:`fdatasync(2)` so this falls back to using :manpage:`fsync(2)`.
 	Defaults to 0, which means fio does not periodically issue and wait for a
 	data-only sync to complete.
@@ -1984,6 +1996,11 @@ I/O engine
 			set  `filesize` so that all the accounting still occurs, but no
 			actual I/O will be done other than creating the file.
 
+		**filestat**
+			Simply do stat() and do no I/O to the file. You need to set 'filesize'
+			and 'nrfiles', so that files will be created.
+			This engine is to measure file lookup and meta data access.
+
 		**libpmem**
 			Read and write using mmap I/O to a file on a filesystem
 			mounted with DAX on a persistent memory device through the PMDK
@@ -2017,23 +2034,32 @@ In addition, there are some parameters which are only valid when a specific
 with the caveat that when used on the command line, they must come after the
 :option:`ioengine` that defines them is selected.
 
-.. option:: hipri : [io_uring]
+.. option:: cmdprio_percentage=int : [io_uring] [libaio]
 
-	If this option is set, fio will attempt to use polled IO completions.
-	Normal IO completions generate interrupts to signal the completion of
-	IO, polled completions do not. Hence they are require active reaping
-	by the application. The benefits are more efficient IO for high IOPS
-	scenarios, and lower latencies for low queue depth IO.
+    Set the percentage of I/O that will be issued with higher priority by setting
+    the priority bit. Non-read I/O is likely unaffected by ``cmdprio_percentage``.
+    This option cannot be used with the `prio` or `prioclass` options. For this
+    option to set the priority bit properly, NCQ priority must be supported and
+    enabled and :option:`direct`\=1 option must be used.
 
 .. option:: fixedbufs : [io_uring]
 
-	If fio is asked to do direct IO, then Linux will map pages for each
-	IO call, and release them when IO is done. If this option is set, the
-	pages are pre-mapped before IO is started. This eliminates the need to
-	map and release for each IO. This is more efficient, and reduces the
-	IO latency as well.
+    If fio is asked to do direct IO, then Linux will map pages for each
+    IO call, and release them when IO is done. If this option is set, the
+    pages are pre-mapped before IO is started. This eliminates the need to
+    map and release for each IO. This is more efficient, and reduces the
+    IO latency as well.
+
+.. option:: hipri : [io_uring]
+
+    If this option is set, fio will attempt to use polled IO completions.
+    Normal IO completions generate interrupts to signal the completion of
+    IO, polled completions do not. Hence they are require active reaping
+    by the application. The benefits are more efficient IO for high IOPS
+    scenarios, and lower latencies for low queue depth IO.
 
 .. option:: registerfiles : [io_uring]
+
 	With this option, fio registers the set of files being used with the
 	kernel. This avoids the overhead of managing file counts in the kernel,
 	making the submission and completion part more lightweight. Required
@@ -2240,6 +2266,11 @@ with the caveat that when used on the command line, they must come after the
 	will be used in the rdma_resolve_add() function. This can be useful when
 	multiple paths exist between the client and the server or in certain loopback
 	configurations.
+
+.. option:: stat_type=str : [filestat]
+
+	Specify stat system call type to measure lookup/getattr performance.
+	Default is **stat** for :manpage:`stat(2)`.
 
 .. option:: readfua=bool : [sg]
 
@@ -2558,7 +2589,7 @@ I/O replay
 	(``blkparse <device> -o /dev/null -d file_for_fio.bin``).
 	You can specify a number of files by separating the names with a ':'
 	character. See the :option:`filename` option for information on how to
-	escape ':' and '\' characters within the file names. These files will
+	escape ':' characters within the file names. These files will
 	be sequentially assigned to job clones created by :option:`numjobs`.
 
 .. option:: read_iolog_chunked=bool
@@ -2681,14 +2712,14 @@ Threads, processes and job synchronization
 	between 0 and 7, with 0 being the highest.  See man
 	:manpage:`ionice(1)`. Refer to an appropriate manpage for other operating
 	systems since meaning of priority may differ. For per-command priority
-    setting, see I/O engine specific `prio_percent` and `hipri_percent`
-    options.
+	setting, see I/O engine specific `cmdprio_percentage` and `hipri_percentage`
+	options.
 
 .. option:: prioclass=int
 
 	Set the I/O priority class. See man :manpage:`ionice(1)`. For per-command
-    priority setting, see I/O engine specific `prio_percent` and
-    `hipri_percent` options.
+	priority setting, see I/O engine specific `cmdprio_percentage` and
+	`hipri_percentage` options.
 
 .. option:: cpus_allowed=str
 
@@ -2723,7 +2754,7 @@ Threads, processes and job synchronization
 			Each job will get a unique CPU from the CPU set.
 
 	**shared** is the default behavior, if the option isn't specified. If
-	**split** is specified, then fio will will assign one cpu per job. If not
+	**split** is specified, then fio will assign one cpu per job. If not
 	enough CPUs are given for the jobs listed, then fio will roundrobin the CPUs
 	in the set.
 
@@ -2812,9 +2843,21 @@ Threads, processes and job synchronization
 
 .. option:: exitall
 
-	By default, fio will continue running all other jobs when one job finishes
-	but sometimes this is not the desired action.  Setting ``exitall`` will
-	instead make fio terminate all other jobs when one job finishes.
+	By default, fio will continue running all other jobs when one job finishes.
+	Sometimes this is not the desired action.  Setting ``exitall`` will instead
+	make fio terminate all jobs in the same group, as soon as one job of that
+	group finishes.
+
+.. option:: exit_what
+
+	By default, fio will continue running all other jobs when one job finishes.
+	Sometimes this is not the desired action. Setting ``exit_all`` will
+	instead make fio terminate all jobs in the same group. The option
+        ``exit_what`` allows to control which jobs get terminated when ``exitall`` is
+        enabled. The default is ``group`` and does not change the behaviour of
+        ``exitall``. The setting ``all`` terminates all jobs. The setting ``stonewall``
+        terminates all currently running jobs across all groups and continues execution
+        with the next stonewalled group.
 
 .. option:: exec_prerun=str
 
@@ -3310,27 +3353,28 @@ Measurements and reporting
 	Disable measurements of throughput/bandwidth numbers. See
 	:option:`disable_lat`.
 
+.. option:: slat_percentiles=bool
+
+	Report submission latency percentiles. Submission latency is not recorded
+	for synchronous ioengines.
+
 .. option:: clat_percentiles=bool
 
-	Enable the reporting of percentiles of completion latencies.  This
-	option is mutually exclusive with :option:`lat_percentiles`.
+	Report completion latency percentiles.
 
 .. option:: lat_percentiles=bool
 
-	Enable the reporting of percentiles of I/O latencies. This is similar
-	to :option:`clat_percentiles`, except that this includes the
-	submission latency. This option is mutually exclusive with
-	:option:`clat_percentiles`.
+	Report total latency percentiles. Total latency is the sum of submission
+	latency and completion latency.
 
 .. option:: percentile_list=float_list
 
-	Overwrite the default list of percentiles for completion latencies and
-	the block error histogram.  Each number is a floating number in the
-	range (0,100], and the maximum length of the list is 20. Use ``:`` to
-	separate the numbers, and list the numbers in ascending order. For
+	Overwrite the default list of percentiles for latencies and the block error
+	histogram.  Each number is a floating point number in the range (0,100], and
+	the maximum length of the list is 20. Use ``:`` to separate the numbers. For
 	example, ``--percentile_list=99.5:99.9`` will cause fio to report the
-	values of completion latency below which 99.5% and 99.9% of the observed
-	latencies fell, respectively.
+	latency durations below which 99.5% and 99.9% of the observed latencies fell,
+	respectively.
 
 .. option:: significant_figures=int
 
@@ -3976,7 +4020,7 @@ only file passed to :option:`read_iolog`. An example would look like::
 	$ fio --read_iolog="<file1>:<file2>" --merge_blktrace_file="<output_file>"
 
 Creating only the merged file can be done by passing the command line argument
-:option:`merge-blktrace-only`.
+:option:`--merge-blktrace-only`.
 
 Scaling traces can be done to see the relative impact of any particular trace
 being slowed down or sped up. :option:`merge_blktrace_scalars` takes in a colon

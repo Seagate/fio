@@ -3,6 +3,8 @@
 
 #include "iolog.h"
 #include "lib/output_buffer.h"
+#include "diskutil.h"
+#include "json.h"
 
 struct group_run_stats {
 	uint64_t max_run[DDIR_RWDIR_CNT], min_run[DDIR_RWDIR_CNT];
@@ -35,7 +37,7 @@ struct group_run_stats {
 					list of percentiles */
 
 /*
- * Aggregate clat samples to report percentile(s) of them.
+ * Aggregate latency samples for reporting percentile(s).
  *
  * EXECUTIVE SUMMARY
  *
@@ -56,7 +58,7 @@ struct group_run_stats {
  *
  * DETAILS
  *
- * Suppose the clat varies from 0 to 999 (usec), the straightforward
+ * Suppose the lat varies from 0 to 999 (usec), the straightforward
  * method is to keep an array of (999 + 1) buckets, in which a counter
  * keeps the count of samples which fall in the bucket, e.g.,
  * {[0],[1],...,[999]}. However this consumes a huge amount of space,
@@ -145,6 +147,14 @@ enum block_info_state {
 #define FIO_JOBDESC_SIZE	256
 #define FIO_VERROR_SIZE		128
 
+enum fio_lat {
+	FIO_SLAT = 0,
+	FIO_CLAT,
+	FIO_LAT,
+
+	FIO_LAT_CNT = 3,
+};
+
 struct thread_stat {
 	char name[FIO_JOBNAME_SIZE];
 	char verror[FIO_VERROR_SIZE];
@@ -179,6 +189,8 @@ struct thread_stat {
 	 */
 	uint32_t clat_percentiles;
 	uint32_t lat_percentiles;
+	uint32_t slat_percentiles;
+	uint32_t pad;
 	uint64_t percentile_precision;
 	fio_fp64_t percentile_list[FIO_IO_U_LIST_MAX_LEN];
 
@@ -188,7 +200,7 @@ struct thread_stat {
 	uint64_t io_u_lat_n[FIO_IO_U_LAT_N_NR];
 	uint64_t io_u_lat_u[FIO_IO_U_LAT_U_NR];
 	uint64_t io_u_lat_m[FIO_IO_U_LAT_M_NR];
-	uint64_t io_u_plat[DDIR_RWDIR_CNT][FIO_IO_U_PLAT_NR];
+	uint64_t io_u_plat[FIO_LAT_CNT][DDIR_RWDIR_CNT][FIO_IO_U_PLAT_NR];
 	uint64_t io_u_sync_plat[FIO_IO_U_PLAT_NR];
 
 	uint64_t total_io_u[DDIR_RWDIR_SYNC_CNT];
@@ -237,11 +249,10 @@ struct thread_stat {
 	fio_fp64_t ss_deviation;
 	fio_fp64_t ss_criterion;
 
-	bool priority_bit;
-	uint64_t io_u_plat_high_prio[FIO_IO_U_PLAT_NR];
-	uint64_t io_u_plat_prio[FIO_IO_U_PLAT_NR];
-	struct io_stat clat_high_prio_stat __attribute__((aligned(8)));
-	struct io_stat clat_prio_stat __attribute__((aligned(8)));
+	uint64_t io_u_plat_high_prio[DDIR_RWDIR_CNT][FIO_IO_U_PLAT_NR] __attribute__((aligned(8)));;
+	uint64_t io_u_plat_low_prio[DDIR_RWDIR_CNT][FIO_IO_U_PLAT_NR];
+	struct io_stat clat_high_prio_stat[DDIR_RWDIR_CNT] __attribute__((aligned(8)));
+	struct io_stat clat_low_prio_stat[DDIR_RWDIR_CNT];
 
 	union {
 		uint64_t *ss_iops_data;
@@ -256,32 +267,39 @@ struct thread_stat {
 	uint64_t cachemiss;
 } __attribute__((packed));
 
-struct jobs_eta {
-	uint32_t nr_running;
-	uint32_t nr_ramp;
+#define JOBS_ETA {							\
+	uint32_t nr_running;						\
+	uint32_t nr_ramp;						\
+									\
+	uint32_t nr_pending;						\
+	uint32_t nr_setting_up;						\
+									\
+	uint64_t m_rate[DDIR_RWDIR_CNT];				\
+	uint64_t t_rate[DDIR_RWDIR_CNT];				\
+	uint64_t rate[DDIR_RWDIR_CNT];					\
+	uint32_t m_iops[DDIR_RWDIR_CNT];				\
+	uint32_t t_iops[DDIR_RWDIR_CNT];				\
+	uint32_t iops[DDIR_RWDIR_CNT];					\
+	uint32_t pad;							\
+	uint64_t elapsed_sec;						\
+	uint64_t eta_sec;						\
+	uint32_t is_pow2;						\
+	uint32_t unit_base;						\
+									\
+	uint32_t sig_figs;						\
+									\
+	uint32_t files_open;						\
+									\
+	/*								\
+	 * Network 'copy' of run_str[]					\
+	 */								\
+	uint32_t nr_threads;						\
+	uint32_t pad2;							\
+	uint8_t run_str[];						\
+}
 
-	uint32_t nr_pending;
-	uint32_t nr_setting_up;
-
-	uint64_t m_rate[DDIR_RWDIR_CNT], t_rate[DDIR_RWDIR_CNT];
-	uint64_t rate[DDIR_RWDIR_CNT];
-	uint32_t m_iops[DDIR_RWDIR_CNT], t_iops[DDIR_RWDIR_CNT];
-	uint32_t iops[DDIR_RWDIR_CNT];
-	uint64_t elapsed_sec;
-	uint64_t eta_sec;
-	uint32_t is_pow2;
-	uint32_t unit_base;
-
-	uint32_t sig_figs;
-
-	uint32_t files_open;
-
-	/*
-	 * Network 'copy' of run_str[]
-	 */
-	uint32_t nr_threads;
-	uint8_t run_str[];
-} __attribute__((packed));
+struct jobs_eta JOBS_ETA;
+struct jobs_eta_packed JOBS_ETA __attribute__((packed));
 
 struct io_u_plat_entry {
 	struct flist_head list;
@@ -319,20 +337,24 @@ extern void update_rusage_stat(struct thread_data *);
 extern void clear_rusage_stat(struct thread_data *);
 
 extern void add_lat_sample(struct thread_data *, enum fio_ddir, unsigned long long,
-				unsigned long long, uint64_t, bool);
+				unsigned long long, uint64_t, uint8_t);
 extern void add_clat_sample(struct thread_data *, enum fio_ddir, unsigned long long,
-				unsigned long long, uint64_t, bool);
-extern void add_slat_sample(struct thread_data *, enum fio_ddir, unsigned long,
-				unsigned long long, uint64_t, bool);
+				unsigned long long, uint64_t, uint8_t);
+extern void add_slat_sample(struct thread_data *, enum fio_ddir, unsigned long long,
+				unsigned long long, uint64_t, uint8_t);
 extern void add_agg_sample(union io_sample_data, enum fio_ddir, unsigned long long bs,
-				unsigned int priority_bit);
+				uint8_t priority_bit);
 extern void add_iops_sample(struct thread_data *, struct io_u *,
 				unsigned int);
 extern void add_bw_sample(struct thread_data *, struct io_u *,
 				unsigned int, unsigned long long);
 extern void add_sync_clat_sample(struct thread_stat *ts,
-					unsigned long long nsec);
+				unsigned long long nsec);
 extern int calc_log_samples(void);
+
+extern void print_disk_util(struct disk_util_stat *, struct disk_util_agg *, int terse, struct buf_output *);
+extern void json_array_add_disk_util(struct disk_util_stat *dus,
+				struct disk_util_agg *agg, struct json_array *parent);
 
 extern struct io_log *agg_io_log[DDIR_RWDIR_CNT];
 extern bool write_bw_log;

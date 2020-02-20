@@ -36,6 +36,8 @@
 #include "lib/rand.h"
 #include "lib/rbtree.h"
 #include "lib/num2str.h"
+#include "lib/memalign.h"
+#include "smalloc.h"
 #include "client.h"
 #include "server.h"
 #include "stat.h"
@@ -137,6 +139,7 @@ enum {
 	FIO_RAND_ZONE_OFF,
 	FIO_RAND_POISSON2_OFF,
 	FIO_RAND_POISSON3_OFF,
+	FIO_RAND_PRIO_CMDS,
 	FIO_RAND_NR_OFFS,
 };
 
@@ -256,6 +259,7 @@ struct thread_data {
 	struct frand_state buf_state_prev;
 	struct frand_state dedupe_state;
 	struct frand_state zone_state;
+	struct frand_state prio_state;
 
 	struct zone_split_index **zone_state_index;
 
@@ -660,8 +664,14 @@ extern const char *runstate_to_name(int runstate);
  */
 #define FIO_REAP_TIMEOUT	300
 
-#define TERMINATE_ALL		(-1U)
-extern void fio_terminate_threads(unsigned int);
+enum {
+	TERMINATE_NONE = 0,
+	TERMINATE_GROUP = 1,
+	TERMINATE_STONEWALL = 2,
+	TERMINATE_ALL = -1,
+};
+
+extern void fio_terminate_threads(unsigned int, unsigned int);
 extern void fio_mark_td_terminate(struct thread_data *);
 
 /*
@@ -704,16 +714,6 @@ extern void lat_target_reset(struct thread_data *);
 		for ((i) = 0, (f) = (td)->files[0];			\
 	    	 (i) < (td)->o.nr_files && ((f) = (td)->files[i]) != NULL; \
 		 (i)++)
-
-#define fio_assert(td, cond)	do {	\
-	if (!(cond)) {			\
-		int *__foo = NULL;	\
-		fprintf(stderr, "file:%s:%d, assert %s failed\n", __FILE__, __LINE__, #cond);	\
-		td_set_runstate((td), TD_EXITED);	\
-		(td)->error = EFAULT;		\
-		*__foo = 0;			\
-	}	\
-} while (0)
 
 static inline bool fio_fill_issue_time(struct thread_data *td)
 {
@@ -859,5 +859,15 @@ extern void check_trigger_file(void);
 
 extern bool in_flight_overlap(struct io_u_queue *q, struct io_u *io_u);
 extern pthread_mutex_t overlap_check;
+
+static inline void *fio_memalign(size_t alignment, size_t size, bool shared)
+{
+	return __fio_memalign(alignment, size, shared ? smalloc : malloc);
+}
+
+static inline void fio_memfree(void *ptr, size_t size, bool shared)
+{
+	return __fio_memfree(ptr, size, shared ? sfree : free);
+}
 
 #endif

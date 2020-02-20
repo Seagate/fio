@@ -33,8 +33,6 @@
  */
 #define FIO_MAX_JOBS		128
 
-typedef off_t off64_t;
-
 #ifndef CONFIG_CLOCKID_T
 typedef unsigned int clockid_t;
 #endif
@@ -96,12 +94,6 @@ static inline int gettid(void)
 	return mach_thread_self();
 }
 #endif
-
-/*
- * For some reason, there's no header definition for fdatasync(), even
- * if it exists.
- */
-extern int fdatasync(int fd);
 
 static inline bool fio_fallocate(struct fio_file *f, uint64_t offset, uint64_t len)
 {

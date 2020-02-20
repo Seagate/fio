@@ -14,6 +14,7 @@
 #include "lib/rand.h"
 #include "lib/hweight.h"
 #include "lib/pattern.h"
+#include "oslib/asprintf.h"
 
 #include "crc/md5.h"
 #include "crc/crc64.h"
@@ -844,13 +845,11 @@ static int verify_header(struct io_u *io_u, struct thread_data *td,
 	 * For read-only workloads, the program cannot be certain of the
 	 * last numberio written to a block. Checking of numberio will be
 	 * done only for workloads that write data.  For verify_only,
-	 * numberio will be checked in the last iteration when the correct
-	 * state of numberio, that would have been written to each block
-	 * in a previous run of fio, has been reached.
+	 * numberio check is skipped.
 	 */
 	if (td_write(td) && (td_min_bs(td) == td_max_bs(td)) &&
 	    !td->o.time_based)
-		if (!td->o.verify_only || td->o.loops == 0)
+		if (!td->o.verify_only)
 			if (hdr->numberio != io_u->numberio) {
 				log_err("verify: bad header numberio %"PRIu16
 					", wanted %"PRIu16,
@@ -1191,6 +1190,10 @@ static void populate_hdr(struct thread_data *td, struct io_u *io_u,
 
 	fill_hdr(td, io_u, hdr, header_num, header_len, io_u->rand_seed);
 
+	if (header_len <= hdr_size(td, hdr)) {
+		td_verror(td, EINVAL, "Blocksize too small");
+		return;
+	}
 	data_len = header_len - hdr_size(td, hdr);
 
 	data = p + hdr_size(td, hdr);
@@ -1635,8 +1638,7 @@ struct all_io_list *get_all_io_list(int save_mask, size_t *sz)
 			s->rand.state32.s[3] = 0;
 			s->rand.use64 = 0;
 		}
-		s->name[sizeof(s->name) - 1] = '\0';
-		strncpy((char *) s->name, td->o.name, sizeof(s->name) - 1);
+		snprintf((char *) s->name, sizeof(s->name), "%s", td->o.name);
 		next = io_list_next(s);
 	}
 

@@ -520,7 +520,7 @@ static void probe_client(struct fio_client *client)
 
 	sname = server_name(client, buf, sizeof(buf));
 	memset(pdu.server, 0, sizeof(pdu.server));
-	strncpy((char *) pdu.server, sname, sizeof(pdu.server) - 1);
+	snprintf((char *) pdu.server, sizeof(pdu.server), "%s", sname);
 
 	fio_net_send_cmd(client->fd, FIO_NET_CMD_PROBE, &pdu, sizeof(pdu), &tag, &client->cmd_list);
 }
@@ -574,7 +574,8 @@ static int fio_client_connect_sock(struct fio_client *client)
 
 	memset(addr, 0, sizeof(*addr));
 	addr->sun_family = AF_UNIX;
-	strncpy(addr->sun_path, client->hostname, sizeof(addr->sun_path) - 1);
+	snprintf(addr->sun_path, sizeof(addr->sun_path), "%s",
+		 client->hostname);
 
 	fd = socket(AF_UNIX, SOCK_STREAM, 0);
 	if (fd < 0) {
@@ -943,7 +944,7 @@ static void convert_io_stat(struct io_stat *dst, struct io_stat *src)
 
 static void convert_ts(struct thread_stat *dst, struct thread_stat *src)
 {
-	int i, j;
+	int i, j, k;
 
 	dst->error		= le32_to_cpu(src->error);
 	dst->thread_number	= le32_to_cpu(src->thread_number);
@@ -959,6 +960,7 @@ static void convert_ts(struct thread_stat *dst, struct thread_stat *src)
 		convert_io_stat(&dst->bw_stat[i], &src->bw_stat[i]);
 		convert_io_stat(&dst->iops_stat[i], &src->iops_stat[i]);
 	}
+	convert_io_stat(&dst->sync_stat, &src->sync_stat);
 
 	dst->usr_time		= le64_to_cpu(src->usr_time);
 	dst->sys_time		= le64_to_cpu(src->sys_time);
@@ -967,6 +969,7 @@ static void convert_ts(struct thread_stat *dst, struct thread_stat *src)
 	dst->majf		= le64_to_cpu(src->majf);
 	dst->clat_percentiles	= le32_to_cpu(src->clat_percentiles);
 	dst->lat_percentiles	= le32_to_cpu(src->lat_percentiles);
+	dst->slat_percentiles	= le32_to_cpu(src->slat_percentiles);
 	dst->percentile_precision = le64_to_cpu(src->percentile_precision);
 
 	for (i = 0; i < FIO_IO_U_LIST_MAX_LEN; i++) {
@@ -989,12 +992,18 @@ static void convert_ts(struct thread_stat *dst, struct thread_stat *src)
 	for (i = 0; i < FIO_IO_U_LAT_M_NR; i++)
 		dst->io_u_lat_m[i]	= le64_to_cpu(src->io_u_lat_m[i]);
 
-	for (i = 0; i < DDIR_RWDIR_CNT; i++)
-		for (j = 0; j < FIO_IO_U_PLAT_NR; j++)
-			dst->io_u_plat[i][j] = le64_to_cpu(src->io_u_plat[i][j]);
+	for (i = 0; i < FIO_LAT_CNT; i++)
+		for (j = 0; j < DDIR_RWDIR_CNT; j++)
+			for (k = 0; k < FIO_IO_U_PLAT_NR; k++)
+				dst->io_u_plat[i][j][k] = le64_to_cpu(src->io_u_plat[i][j][k]);
+
+	for (j = 0; j < FIO_IO_U_PLAT_NR; j++)
+		dst->io_u_sync_plat[j] = le64_to_cpu(src->io_u_sync_plat[j]);
+
+	for (i = 0; i < DDIR_RWDIR_SYNC_CNT; i++)
+		dst->total_io_u[i]	= le64_to_cpu(src->total_io_u[i]);
 
 	for (i = 0; i < DDIR_RWDIR_CNT; i++) {
-		dst->total_io_u[i]	= le64_to_cpu(src->total_io_u[i]);
 		dst->short_io_u[i]	= le64_to_cpu(src->short_io_u[i]);
 		dst->drop_io_u[i]	= le64_to_cpu(src->drop_io_u[i]);
 	}
@@ -1025,13 +1034,14 @@ static void convert_ts(struct thread_stat *dst, struct thread_stat *src)
 	dst->nr_block_infos	= le64_to_cpu(src->nr_block_infos);
 	for (i = 0; i < dst->nr_block_infos; i++)
 		dst->block_infos[i] = le32_to_cpu(src->block_infos[i]);
-	dst->priority_bit = src->priority_bit;
-	for (i = 0; i < FIO_IO_U_PLAT_NR; i++) {
-		dst->io_u_plat_high_prio[i] = le64_to_cpu(src->io_u_plat_high_prio[i]);
-		dst->io_u_plat_prio[i] = le64_to_cpu(src->io_u_plat_prio[i]);
+	for (i = 0; i < DDIR_RWDIR_CNT; i++) {
+		for (j = 0; j < FIO_IO_U_PLAT_NR; j++) {
+			dst->io_u_plat_high_prio[i][j] = le64_to_cpu(src->io_u_plat_high_prio[i][j]);
+			dst->io_u_plat_low_prio[i][j] = le64_to_cpu(src->io_u_plat_low_prio[i][j]);
+		}
+		convert_io_stat(&dst->clat_high_prio_stat[i], &src->clat_high_prio_stat[i]);
+		convert_io_stat(&dst->clat_low_prio_stat[i], &src->clat_low_prio_stat[i]);
 	}
-	convert_io_stat(&dst->clat_high_prio_stat, &src->clat_high_prio_stat);
-	convert_io_stat(&dst->clat_prio_stat, &src->clat_prio_stat);
 
 	dst->ss_dur		= le64_to_cpu(src->ss_dur);
 	dst->ss_state		= le32_to_cpu(src->ss_state);
@@ -1157,6 +1167,10 @@ static void handle_job_opt(struct fio_client *client, struct fio_net_cmd *cmd)
 		struct flist_head *opt_list = &client->opt_lists[pdu->groupid];
 
 		flist_add_tail(&p->list, opt_list);
+	} else {
+		free(p->value);
+		free(p->name);
+		free(p);
 	}
 }
 

@@ -85,7 +85,8 @@ run_fio() {
 
     fio=$(dirname "$0")/../../fio
 
-    opts=("--aux-path=/tmp" "--allow_file_create=0" "$@")
+    opts=("--aux-path=/tmp" "--allow_file_create=0" \
+			    "--significant_figures=10" "$@")
     { echo; echo "fio ${opts[*]}"; echo; } >>"${logfile}.${test_number}"
 
     "${dynamic_analyzer[@]}" "$fio" "${opts[@]}"
@@ -706,8 +707,9 @@ test42() {
 	grep -q 'Specifying the zone size is mandatory for regular block devices with --zonemode=zbd'
 }
 
-# Check whether fio handles --zonesize=1 correctly.
+# Check whether fio handles --zonesize=1 correctly for regular block devices.
 test43() {
+    [ -n "$is_zbd" ] && return 0
     read_one_block --zonemode=zbd --zonesize=1 |
 	grep -q 'zone size must be at least 512 bytes for --zonemode=zbd'
 }
@@ -741,6 +743,18 @@ test46() {
     check_written $((size * 8)) || return $?
 }
 
+# Check whether fio handles --zonemode=zbd --zoneskip=1 correctly.
+test47() {
+    local bs
+
+    [ -z "$is_zbd" ] && return 0
+    bs=$((logical_block_size))
+    run_one_fio_job --ioengine=psync --rw=write --bs=$bs \
+		    --zonemode=zbd --zoneskip=1		 \
+		    >> "${logfile}.${test_number}" 2>&1 && return 1
+    grep -q 'zoneskip 1 is not a multiple of the device zone size' "${logfile}.${test_number}"
+}
+
 tests=()
 dynamic_analyzer=()
 reset_all_zones=
@@ -771,8 +785,8 @@ source "$(dirname "$0")/functions" || exit $?
 dev=$1
 realdev=$(readlink -f "$dev")
 basename=$(basename "$realdev")
-major=$((0x$(stat -L -c '%t' "$realdev")))
-minor=$((0x$(stat -L -c '%T' "$realdev")))
+major=$((0x$(stat -L -c '%t' "$realdev"))) || exit $?
+minor=$((0x$(stat -L -c '%T' "$realdev"))) || exit $?
 disk_size=$(($(<"/sys/dev/block/$major:$minor/size")*512))
 # When the target is a partition device, get basename of its holder device to
 # access sysfs path of the holder device
@@ -812,9 +826,8 @@ case "$(<"/sys/class/block/$basename/queue/zoned")" in
 esac
 
 if [ "${#tests[@]}" = 0 ]; then
-    for ((i=1;i<=46;i++)); do
-	tests+=("$i")
-    done
+    readarray -t tests < <(declare -F | grep "test[0-9]*" | \
+				   tr -c -d "[:digit:]\n" | sort -n)
 fi
 
 logfile=$0.log

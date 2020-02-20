@@ -41,8 +41,8 @@ union io_sample_data {
 struct io_sample {
 	uint64_t time;
 	union io_sample_data data;
-	uint32_t __ddir :31;
-	uint8_t priority_bit :1;
+	uint32_t __ddir;
+	uint8_t priority_bit;
 	uint64_t bs;
 };
 

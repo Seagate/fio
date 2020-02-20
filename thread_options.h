@@ -201,7 +201,8 @@ struct thread_options {
 
 	unsigned long long max_latency;
 
-	unsigned int stonewall;
+	unsigned short exit_what;
+	unsigned short stonewall;
 	unsigned int new_group;
 	unsigned int numjobs;
 	os_cpu_mask_t cpumask;
@@ -249,6 +250,7 @@ struct thread_options {
 	unsigned int trim_zero;
 	unsigned long long trim_backlog;
 	unsigned int clat_percentiles;
+	unsigned int slat_percentiles;
 	unsigned int lat_percentiles;
 	unsigned int percentile_precision;	/* digits after decimal for percentiles */
 	fio_fp64_t percentile_list[FIO_IO_U_LIST_MAX_LEN];
@@ -313,6 +315,7 @@ struct thread_options {
 	int flow_watermark;
 	unsigned int flow_sleep;
 
+	unsigned int offset_increment_percent;
 	unsigned long long offset_increment;
 	unsigned long long number_ios;
 
@@ -368,7 +371,7 @@ struct thread_options_pack {
 	uint32_t iodepth_batch_complete_min;
 	uint32_t iodepth_batch_complete_max;
 	uint32_t serialize_overlap;
-	uint32_t lat_percentiles;
+	uint32_t pad;
 
 	uint64_t size;
 	uint64_t io_size;
@@ -428,7 +431,7 @@ struct thread_options_pack {
 	uint32_t override_sync;
 	uint32_t rand_repeatable;
 	uint32_t allrand_repeatable;
-	uint32_t pad;
+	uint32_t pad2;
 	uint64_t rand_seed;
 	uint32_t log_avg_msec;
 	uint32_t log_hist_msec;
@@ -462,7 +465,6 @@ struct thread_options_pack {
 
 	uint32_t hugepage_size;
 	uint64_t rw_min_bs;
-	uint32_t pad2;
 	uint32_t thinktime;
 	uint32_t thinktime_spin;
 	uint32_t thinktime_blocks;
@@ -488,7 +490,8 @@ struct thread_options_pack {
 	uint32_t mem_type;
 	uint32_t mem_align;
 
-	uint32_t stonewall;
+	uint16_t exit_what;
+	uint16_t stonewall;
 	uint32_t new_group;
 	uint32_t numjobs;
 	/*
@@ -536,7 +539,10 @@ struct thread_options_pack {
 	uint32_t trim_zero;
 	uint64_t trim_backlog;
 	uint32_t clat_percentiles;
+	uint32_t lat_percentiles;
+	uint32_t slat_percentiles;
 	uint32_t percentile_precision;
+	uint32_t pad3;
 	fio_fp64_t percentile_list[FIO_IO_U_LIST_MAX_LEN];
 
 	uint8_t read_iolog_file[FIO_TOP_STR_MAX];
@@ -570,7 +576,6 @@ struct thread_options_pack {
 	uint32_t rate_iops_min[DDIR_RWDIR_CNT];
 	uint32_t rate_process;
 	uint32_t rate_ign_think;
-	uint32_t pad3;
 
 	uint8_t ioscheduler[FIO_TOP_STR_MAX];
 
@@ -599,6 +604,7 @@ struct thread_options_pack {
 	int32_t flow_watermark;
 	uint32_t flow_sleep;
 
+	uint32_t offset_increment_percent;
 	uint64_t offset_increment;
 	uint64_t number_ios;
 

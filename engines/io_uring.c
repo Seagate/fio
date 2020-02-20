@@ -50,6 +50,8 @@ struct ioring_data {
 
 	struct io_u **io_u_index;
 
+	int *fds;
+
 	struct io_sq_ring sq_ring;
 	struct io_uring_sqe *sqes;
 	struct iovec *iovecs;
@@ -68,10 +70,24 @@ struct ioring_data {
 struct ioring_options {
 	void *pad;
 	unsigned int hipri;
+	unsigned int cmdprio_percentage;
 	unsigned int fixedbufs;
+	unsigned int registerfiles;
 	unsigned int sqpoll_thread;
 	unsigned int sqpoll_set;
 	unsigned int sqpoll_cpu;
+	unsigned int nonvectored;
+	unsigned int uncached;
+};
+
+static const int ddir_to_op[2][2] = {
+	{ IORING_OP_READV, IORING_OP_READ },
+	{ IORING_OP_WRITEV, IORING_OP_WRITE }
+};
+
+static const int fixed_ddir_to_op[2] = {
+	IORING_OP_READ_FIXED,
+	IORING_OP_WRITE_FIXED
 };
 
 static int fio_ioring_sqpoll_cb(void *data, unsigned long long *val)
@@ -91,8 +107,28 @@ static struct fio_option options[] = {
 		.off1	= offsetof(struct ioring_options, hipri),
 		.help	= "Use polled IO completions",
 		.category = FIO_OPT_C_ENGINE,
-		.group	= FIO_OPT_G_LIBAIO,
+		.group	= FIO_OPT_G_IOURING,
 	},
+#ifdef FIO_HAVE_IOPRIO_CLASS
+	{
+		.name	= "cmdprio_percentage",
+		.lname	= "high priority percentage",
+		.type	= FIO_OPT_INT,
+		.off1	= offsetof(struct ioring_options, cmdprio_percentage),
+		.minval	= 1,
+		.maxval	= 100,
+		.help	= "Send high priority I/O this percentage of the time",
+		.category = FIO_OPT_C_ENGINE,
+		.group	= FIO_OPT_G_IOURING,
+	},
+#else
+	{
+		.name	= "cmdprio_percentage",
+		.lname	= "high priority percentage",
+		.type	= FIO_OPT_UNSUPPORTED,
+		.help	= "Your platform does not support I/O priority classes",
+	},
+#endif
 	{
 		.name	= "fixedbufs",
 		.lname	= "Fixed (pre-mapped) IO buffers",
@@ -100,7 +136,16 @@ static struct fio_option options[] = {
 		.off1	= offsetof(struct ioring_options, fixedbufs),
 		.help	= "Pre map IO buffers",
 		.category = FIO_OPT_C_ENGINE,
-		.group	= FIO_OPT_G_LIBAIO,
+		.group	= FIO_OPT_G_IOURING,
+	},
+	{
+		.name	= "registerfiles",
+		.lname	= "Register file set",
+		.type	= FIO_OPT_STR_SET,
+		.off1	= offsetof(struct ioring_options, registerfiles),
+		.help	= "Pre-open/register files",
+		.category = FIO_OPT_C_ENGINE,
+		.group	= FIO_OPT_G_IOURING,
 	},
 	{
 		.name	= "sqthread_poll",
@@ -109,7 +154,7 @@ static struct fio_option options[] = {
 		.off1	= offsetof(struct ioring_options, sqpoll_thread),
 		.help	= "Offload submission/completion to kernel thread",
 		.category = FIO_OPT_C_ENGINE,
-		.group	= FIO_OPT_G_LIBAIO,
+		.group	= FIO_OPT_G_IOURING,
 	},
 	{
 		.name	= "sqthread_poll_cpu",
@@ -118,7 +163,25 @@ static struct fio_option options[] = {
 		.cb	= fio_ioring_sqpoll_cb,
 		.help	= "What CPU to run SQ thread polling on",
 		.category = FIO_OPT_C_ENGINE,
-		.group	= FIO_OPT_G_LIBAIO,
+		.group	= FIO_OPT_G_IOURING,
+	},
+	{
+		.name	= "nonvectored",
+		.lname	= "Non-vectored",
+		.type	= FIO_OPT_INT,
+		.off1	= offsetof(struct ioring_options, nonvectored),
+		.help	= "Use non-vectored read/write commands",
+		.category = FIO_OPT_C_ENGINE,
+		.group	= FIO_OPT_G_IOURING,
+	},
+	{
+		.name	= "uncached",
+		.lname	= "Uncached",
+		.type	= FIO_OPT_INT,
+		.off1	= offsetof(struct ioring_options, uncached),
+		.help	= "Use RWF_UNCACHED for buffered read/writes",
+		.category = FIO_OPT_C_ENGINE,
+		.group	= FIO_OPT_G_IOURING,
 	},
 	{
 		.name	= NULL,
@@ -140,34 +203,52 @@ static int fio_ioring_prep(struct thread_data *td, struct io_u *io_u)
 	struct io_uring_sqe *sqe;
 
 	sqe = &ld->sqes[io_u->index];
-	sqe->fd = f->fd;
-	sqe->flags = 0;
-	sqe->ioprio = 0;
-	sqe->buf_index = 0;
+
+	/* zero out fields not used in this submission */
+	memset(sqe, 0, sizeof(*sqe));
+
+	if (o->registerfiles) {
+		sqe->fd = f->engine_pos;
+		sqe->flags = IOSQE_FIXED_FILE;
+	} else {
+		sqe->fd = f->fd;
+	}
 
 	if (io_u->ddir == DDIR_READ || io_u->ddir == DDIR_WRITE) {
 		if (o->fixedbufs) {
-			if (io_u->ddir == DDIR_READ)
-				sqe->opcode = IORING_OP_READ_FIXED;
-			else
-				sqe->opcode = IORING_OP_WRITE_FIXED;
+			sqe->opcode = fixed_ddir_to_op[io_u->ddir];
 			sqe->addr = (unsigned long) io_u->xfer_buf;
 			sqe->len = io_u->xfer_buflen;
 			sqe->buf_index = io_u->index;
 		} else {
-			if (io_u->ddir == DDIR_READ)
-				sqe->opcode = IORING_OP_READV;
-			else
-				sqe->opcode = IORING_OP_WRITEV;
-			sqe->addr = (unsigned long) &ld->iovecs[io_u->index];
-			sqe->len = 1;
+			sqe->opcode = ddir_to_op[io_u->ddir][!!o->nonvectored];
+			if (o->nonvectored) {
+				sqe->addr = (unsigned long)
+						ld->iovecs[io_u->index].iov_base;
+				sqe->len = ld->iovecs[io_u->index].iov_len;
+			} else {
+				sqe->addr = (unsigned long) &ld->iovecs[io_u->index];
+				sqe->len = 1;
+			}
 		}
+		if (!td->o.odirect && o->uncached)
+			sqe->rw_flags = RWF_UNCACHED;
+		if (fio_option_is_set(&td->o, ioprio_class))
+			sqe->ioprio = td->o.ioprio_class << 13;
+		if (fio_option_is_set(&td->o, ioprio))
+			sqe->ioprio |= td->o.ioprio;
 		sqe->off = io_u->offset;
 	} else if (ddir_sync(io_u->ddir)) {
-		sqe->fsync_flags = 0;
-		if (io_u->ddir == DDIR_DATASYNC)
-			sqe->fsync_flags |= IORING_FSYNC_DATASYNC;
-		sqe->opcode = IORING_OP_FSYNC;
+		if (io_u->ddir == DDIR_SYNC_FILE_RANGE) {
+			sqe->off = f->first_write;
+			sqe->len = f->last_write - f->first_write;
+			sqe->sync_range_flags = td->o.sync_file_range;
+			sqe->opcode = IORING_OP_SYNC_FILE_RANGE;
+		} else {
+			if (io_u->ddir == DDIR_DATASYNC)
+				sqe->fsync_flags |= IORING_FSYNC_DATASYNC;
+			sqe->opcode = IORING_OP_FSYNC;
+		}
 	}
 
 	sqe->user_data = (unsigned long) io_u;
@@ -242,7 +323,7 @@ static int fio_ioring_getevents(struct thread_data *td, unsigned int min,
 			r = io_uring_enter(ld, 0, actual_min,
 						IORING_ENTER_GETEVENTS);
 			if (r < 0) {
-				if (errno == EAGAIN)
+				if (errno == EAGAIN || errno == EINTR)
 					continue;
 				td_verror(td, errno, "io_uring_enter");
 				break;
@@ -253,11 +334,23 @@ static int fio_ioring_getevents(struct thread_data *td, unsigned int min,
 	return r < 0 ? r : events;
 }
 
+static void fio_ioring_prio_prep(struct thread_data *td, struct io_u *io_u)
+{
+	struct ioring_options *o = td->eo;
+	struct ioring_data *ld = td->io_ops_data;
+	if (rand_between(&td->prio_state, 0, 99) < o->cmdprio_percentage) {
+		ld->sqes[io_u->index].ioprio = IOPRIO_CLASS_RT << IOPRIO_CLASS_SHIFT;
+		io_u->flags |= IO_U_F_PRIORITY;
+	}
+	return;
+}
+
 static enum fio_q_status fio_ioring_queue(struct thread_data *td,
 					  struct io_u *io_u)
 {
 	struct ioring_data *ld = td->io_ops_data;
 	struct io_sq_ring *ring = &ld->sq_ring;
+	struct ioring_options *o = td->eo;
 	unsigned tail, next_tail;
 
 	fio_ro_check(td, io_u);
@@ -283,6 +376,8 @@ static enum fio_q_status fio_ioring_queue(struct thread_data *td,
 
 	/* ensure sqe stores are ordered with tail update */
 	write_barrier();
+	if (o->cmdprio_percentage)
+		fio_ioring_prio_prep(td, io_u);
 	ring->array[tail & ld->sq_ring_mask] = io_u->index;
 	*ring->tail = next_tail;
 	write_barrier();
@@ -353,7 +448,7 @@ static int fio_ioring_commit(struct thread_data *td)
 			io_u_mark_submit(td, ret);
 			continue;
 		} else {
-			if (errno == EAGAIN) {
+			if (errno == EAGAIN || errno == EINTR) {
 				ret = fio_ioring_cqring_reap(td, 0, ld->queued);
 				if (ret)
 					continue;
@@ -388,6 +483,7 @@ static void fio_ioring_cleanup(struct thread_data *td)
 
 		free(ld->io_u_index);
 		free(ld->iovecs);
+		free(ld->fds);
 		free(ld);
 	}
 }
@@ -476,9 +572,50 @@ static int fio_ioring_queue_init(struct thread_data *td)
 	return fio_ioring_mmap(ld, &p);
 }
 
+static int fio_ioring_register_files(struct thread_data *td)
+{
+	struct ioring_data *ld = td->io_ops_data;
+	struct fio_file *f;
+	unsigned int i;
+	int ret;
+
+	ld->fds = calloc(td->o.nr_files, sizeof(int));
+
+	for_each_file(td, f, i) {
+		ret = generic_open_file(td, f);
+		if (ret)
+			goto err;
+		ld->fds[i] = f->fd;
+		f->engine_pos = i;
+	}
+
+	ret = syscall(__NR_sys_io_uring_register, ld->ring_fd,
+			IORING_REGISTER_FILES, ld->fds, td->o.nr_files);
+	if (ret) {
+err:
+		free(ld->fds);
+		ld->fds = NULL;
+	}
+
+	/*
+	 * Pretend the file is closed again, and really close it if we hit
+	 * an error.
+	 */
+	for_each_file(td, f, i) {
+		if (ret) {
+			int fio_unused ret2;
+			ret2 = generic_close_file(td, f);
+		} else
+			f->fd = -1;
+	}
+
+	return ret;
+}
+
 static int fio_ioring_post_init(struct thread_data *td)
 {
 	struct ioring_data *ld = td->io_ops_data;
+	struct ioring_options *o = td->eo;
 	struct io_u *io_u;
 	int err, i;
 
@@ -496,6 +633,14 @@ static int fio_ioring_post_init(struct thread_data *td)
 		return 1;
 	}
 
+	if (o->registerfiles) {
+		err = fio_ioring_register_files(td);
+		if (err) {
+			td_verror(td, errno, "ioring_register_files");
+			return 1;
+		}
+	}
+
 	return 0;
 }
 
@@ -506,7 +651,19 @@ static unsigned roundup_pow2(unsigned depth)
 
 static int fio_ioring_init(struct thread_data *td)
 {
+	struct ioring_options *o = td->eo;
 	struct ioring_data *ld;
+	struct thread_options *to = &td->o;
+
+	/* sqthread submission requires registered files */
+	if (o->sqpoll_thread)
+		o->registerfiles = 1;
+
+	if (o->registerfiles && td->o.nr_files != td->o.open_files) {
+		log_err("fio: io_uring registered files require nr_files to "
+			"be identical to open_files\n");
+		return 1;
+	}
 
 	ld = calloc(1, sizeof(*ld));
 
@@ -519,6 +676,17 @@ static int fio_ioring_init(struct thread_data *td)
 	ld->iovecs = calloc(td->o.iodepth, sizeof(struct iovec));
 
 	td->io_ops_data = ld;
+
+	/*
+	 * Check for option conflicts
+	 */
+	if ((fio_option_is_set(to, ioprio) || fio_option_is_set(to, ioprio_class)) &&
+			o->cmdprio_percentage != 0) {
+		log_err("%s: cmdprio_percentage option and mutually exclusive "
+				"prio or prioclass option is set, exiting\n", to->name);
+		td_verror(td, EINVAL, "fio_io_uring_init");
+		return 1;
+	}
 	return 0;
 }
 
@@ -527,6 +695,30 @@ static int fio_ioring_io_u_init(struct thread_data *td, struct io_u *io_u)
 	struct ioring_data *ld = td->io_ops_data;
 
 	ld->io_u_index[io_u->index] = io_u;
+	return 0;
+}
+
+static int fio_ioring_open_file(struct thread_data *td, struct fio_file *f)
+{
+	struct ioring_data *ld = td->io_ops_data;
+	struct ioring_options *o = td->eo;
+
+	if (!ld || !o->registerfiles)
+		return generic_open_file(td, f);
+
+	f->fd = ld->fds[f->engine_pos];
+	return 0;
+}
+
+static int fio_ioring_close_file(struct thread_data *td, struct fio_file *f)
+{
+	struct ioring_data *ld = td->io_ops_data;
+	struct ioring_options *o = td->eo;
+
+	if (!ld || !o->registerfiles)
+		return generic_close_file(td, f);
+
+	f->fd = -1;
 	return 0;
 }
 
@@ -543,8 +735,8 @@ static struct ioengine_ops ioengine = {
 	.getevents		= fio_ioring_getevents,
 	.event			= fio_ioring_event,
 	.cleanup		= fio_ioring_cleanup,
-	.open_file		= generic_open_file,
-	.close_file		= generic_close_file,
+	.open_file		= fio_ioring_open_file,
+	.close_file		= fio_ioring_close_file,
 	.get_file_size		= generic_get_file_size,
 	.options		= options,
 	.option_struct_size	= sizeof(struct ioring_options),

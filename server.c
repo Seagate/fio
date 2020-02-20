@@ -865,7 +865,8 @@ static int handle_probe_cmd(struct fio_net_cmd *cmd)
 	strcpy(me, (char *) pdu->server);
 
 	gethostname((char *) probe.hostname, sizeof(probe.hostname));
-	strncpy((char *) probe.fio_version, fio_version_string, sizeof(probe.fio_version) - 1);
+	snprintf((char *) probe.fio_version, sizeof(probe.fio_version), "%s",
+		 fio_version_string);
 
 	/*
 	 * If the client supports compression and we do too, then enable it
@@ -974,7 +975,7 @@ static int handle_trigger_cmd(struct fio_net_cmd *cmd, struct flist_head *job_li
 	} else
 		fio_net_queue_cmd(FIO_NET_CMD_VTRIGGER, rep, sz, NULL, SK_F_FREE | SK_F_INLINE);
 
-	fio_terminate_threads(TERMINATE_ALL);
+	fio_terminate_threads(TERMINATE_ALL, TERMINATE_ALL);
 	fio_server_check_jobs(job_list);
 	exec_trigger(buf);
 	return 0;
@@ -991,7 +992,7 @@ static int handle_command(struct sk_out *sk_out, struct flist_head *job_list,
 
 	switch (cmd->opcode) {
 	case FIO_NET_CMD_QUIT:
-		fio_terminate_threads(TERMINATE_ALL);
+		fio_terminate_threads(TERMINATE_ALL, TERMINATE_ALL);
 		ret = 0;
 		break;
 	case FIO_NET_CMD_EXIT:
@@ -1462,7 +1463,7 @@ static void convert_gs(struct group_run_stats *dst, struct group_run_stats *src)
 void fio_server_send_ts(struct thread_stat *ts, struct group_run_stats *rs)
 {
 	struct cmd_ts_pdu p;
-	int i, j;
+	int i, j, k;
 	void *ss_buf;
 	uint64_t *ss_iops, *ss_bw;
 
@@ -1470,12 +1471,10 @@ void fio_server_send_ts(struct thread_stat *ts, struct group_run_stats *rs)
 
 	memset(&p, 0, sizeof(p));
 
-	strncpy(p.ts.name, ts->name, FIO_JOBNAME_SIZE);
-	p.ts.name[FIO_JOBNAME_SIZE - 1] = '\0';
-	strncpy(p.ts.verror, ts->verror, FIO_VERROR_SIZE);
-	p.ts.verror[FIO_VERROR_SIZE - 1] = '\0';
-	strncpy(p.ts.description, ts->description, FIO_JOBDESC_SIZE);
-	p.ts.description[FIO_JOBDESC_SIZE - 1] = '\0';
+	snprintf(p.ts.name, sizeof(p.ts.name), "%s", ts->name);
+	snprintf(p.ts.verror, sizeof(p.ts.verror), "%s", ts->verror);
+	snprintf(p.ts.description, sizeof(p.ts.description), "%s",
+		 ts->description);
 
 	p.ts.error		= cpu_to_le32(ts->error);
 	p.ts.thread_number	= cpu_to_le32(ts->thread_number);
@@ -1491,6 +1490,7 @@ void fio_server_send_ts(struct thread_stat *ts, struct group_run_stats *rs)
 		convert_io_stat(&p.ts.bw_stat[i], &ts->bw_stat[i]);
 		convert_io_stat(&p.ts.iops_stat[i], &ts->iops_stat[i]);
 	}
+	convert_io_stat(&p.ts.sync_stat, &ts->sync_stat);
 
 	p.ts.usr_time		= cpu_to_le64(ts->usr_time);
 	p.ts.sys_time		= cpu_to_le64(ts->sys_time);
@@ -1499,6 +1499,7 @@ void fio_server_send_ts(struct thread_stat *ts, struct group_run_stats *rs)
 	p.ts.majf		= cpu_to_le64(ts->majf);
 	p.ts.clat_percentiles	= cpu_to_le32(ts->clat_percentiles);
 	p.ts.lat_percentiles	= cpu_to_le32(ts->lat_percentiles);
+	p.ts.slat_percentiles	= cpu_to_le32(ts->slat_percentiles);
 	p.ts.percentile_precision = cpu_to_le64(ts->percentile_precision);
 
 	for (i = 0; i < FIO_IO_U_LIST_MAX_LEN; i++) {
@@ -1521,12 +1522,18 @@ void fio_server_send_ts(struct thread_stat *ts, struct group_run_stats *rs)
 	for (i = 0; i < FIO_IO_U_LAT_M_NR; i++)
 		p.ts.io_u_lat_m[i]	= cpu_to_le64(ts->io_u_lat_m[i]);
 
-	for (i = 0; i < DDIR_RWDIR_CNT; i++)
-		for (j = 0; j < FIO_IO_U_PLAT_NR; j++)
-			p.ts.io_u_plat[i][j] = cpu_to_le64(ts->io_u_plat[i][j]);
+	for (i = 0; i < FIO_LAT_CNT; i++)
+		for (j = 0; j < DDIR_RWDIR_CNT; j++)
+			for (k = 0; k < FIO_IO_U_PLAT_NR; k++)
+				p.ts.io_u_plat[i][j][k] = cpu_to_le64(ts->io_u_plat[i][j][k]);
+
+	for (j = 0; j < FIO_IO_U_PLAT_NR; j++)
+		p.ts.io_u_sync_plat[j] = cpu_to_le64(ts->io_u_sync_plat[j]);
+
+	for (i = 0; i < DDIR_RWDIR_SYNC_CNT; i++)
+		p.ts.total_io_u[i]	= cpu_to_le64(ts->total_io_u[i]);
 
 	for (i = 0; i < DDIR_RWDIR_CNT; i++) {
-		p.ts.total_io_u[i]	= cpu_to_le64(ts->total_io_u[i]);
 		p.ts.short_io_u[i]	= cpu_to_le64(ts->short_io_u[i]);
 		p.ts.drop_io_u[i]	= cpu_to_le64(ts->drop_io_u[i]);
 	}
@@ -1567,17 +1574,18 @@ void fio_server_send_ts(struct thread_stat *ts, struct group_run_stats *rs)
 	p.ts.ss_criterion.u.i	= cpu_to_le64(fio_double_to_uint64(ts->ss_criterion.u.f));
 
 
-	p.ts.priority_bit = ts->priority_bit;
-	for (i = 0; i < FIO_IO_U_PLAT_NR; i++) {
-		p.ts.io_u_plat_high_prio[i] = cpu_to_le64(ts->io_u_plat_high_prio[i]);
-		p.ts.io_u_plat_prio[i] = cpu_to_le64(ts->io_u_plat_prio[i]);
-	}
-	convert_io_stat(&p.ts.clat_high_prio_stat, &ts->clat_high_prio_stat);
-	convert_io_stat(&p.ts.clat_prio_stat, &ts->clat_prio_stat);
-
 	p.ts.cachehit		= cpu_to_le64(ts->cachehit);
 	p.ts.cachemiss		= cpu_to_le64(ts->cachemiss);
 
+
+	for (i = 0; i < DDIR_RWDIR_CNT; i++) {
+		for (j = 0; j < FIO_IO_U_PLAT_NR; j++) {
+			p.ts.io_u_plat_high_prio[i][j] = cpu_to_le64(ts->io_u_plat_high_prio[i][j]);
+			p.ts.io_u_plat_low_prio[i][j] = cpu_to_le64(ts->io_u_plat_low_prio[i][j]);
+		}
+		convert_io_stat(&p.ts.clat_high_prio_stat[i], &ts->clat_high_prio_stat[i]);
+		convert_io_stat(&p.ts.clat_low_prio_stat[i], &ts->clat_low_prio_stat[i]);
+	}
 
 	convert_gs(&p.rs, rs);
 
@@ -1676,8 +1684,7 @@ static void convert_dus(struct disk_util_stat *dst, struct disk_util_stat *src)
 {
 	int i;
 
-	dst->name[FIO_DU_NAME_SZ - 1] = '\0';
-	strncpy((char *) dst->name, (char *) src->name, FIO_DU_NAME_SZ - 1);
+	snprintf((char *) dst->name, sizeof(dst->name), "%s", src->name);
 
 	for (i = 0; i < 2; i++) {
 		dst->s.ios[i]		= cpu_to_le64(src->s.ios[i]);
@@ -1987,8 +1994,7 @@ int fio_send_iolog(struct thread_data *td, struct io_log *log, const char *name)
 	else
 		pdu.compressed = 0;
 
-	strncpy((char *) pdu.name, name, FIO_NET_NAME_MAX);
-	pdu.name[FIO_NET_NAME_MAX - 1] = '\0';
+	snprintf((char *) pdu.name, sizeof(pdu.name), "%s", name);
 
 	/*
 	 * We can't do this for a pre-compressed log, but for that case,
@@ -2161,7 +2167,8 @@ static int fio_init_server_ip(void)
 	/*
 	 * Not fatal if fails, so just ignore it if that happens
 	 */
-	setsockopt(sk, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));
+	if (setsockopt(sk, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt))) {
+	}
 #endif
 
 	if (use_ipv6) {
@@ -2205,9 +2212,8 @@ static int fio_init_server_sock(void)
 
 	mode = umask(000);
 
-	memset(&addr, 0, sizeof(addr));
 	addr.sun_family = AF_UNIX;
-	strncpy(addr.sun_path, bind_sock, sizeof(addr.sun_path) - 1);
+	snprintf(addr.sun_path, sizeof(addr.sun_path), "%s", bind_sock);
 
 	len = sizeof(addr.sun_family) + strlen(bind_sock) + 1;
 
@@ -2257,9 +2263,9 @@ static int fio_init_server_connection(void)
 		if (p)
 			strcat(p, port);
 		else
-			strncpy(bind_str, port, sizeof(bind_str) - 1);
+			snprintf(bind_str, sizeof(bind_str), "%s", port);
 	} else
-		strncpy(bind_str, bind_sock, sizeof(bind_str) - 1);
+		snprintf(bind_str, sizeof(bind_str), "%s", bind_sock);
 
 	log_info("fio: server listening on %s\n", bind_str);
 
