@@ -1838,11 +1838,6 @@ this flag turned on, the AIO ring will be read directly from user-space to
 reap events. The reaping mode is only enabled when polling for a minimum of
 0 events (e.g. when `iodepth_batch_complete=0').
 .TP
-.BI (libaio)prio_percent \fR=\fPint
-Set the percentage of reads that will be issued as priority reads by setting
-the priority bit. Non-read I/O is unaffected by ``prio_percent``. This
-option cannot be used with the `prio` or `prioclass` options.
-.TP
 .BI (pvsync2)hipri
 Set RWF_HIPRI on I/O, indicating to the kernel that it's of higher priority
 than normal.

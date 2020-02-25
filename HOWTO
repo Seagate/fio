@@ -2086,12 +2086,6 @@ with the caveat that when used on the command line, they must come after the
 	reap events. The reaping mode is only enabled when polling for a minimum of
 	0 events (e.g. when :option:`iodepth_batch_complete` `=0`).
 
-.. option:: prio_percent=int : [libaio]
-
-    Set the percentage of reads that will be issued as priority reads by setting
-    the priority bit. Non-read I/O is unaffected by ``prio_percent``. This
-    option cannot be used with the `prio` or `prioclass` options.
-
 .. option:: hipri : [pvsync2]
 
 	Set RWF_HIPRI on I/O, indicating to the kernel that it's of higher priority
