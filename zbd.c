@@ -931,7 +931,7 @@ static int parse_zone_info(struct thread_data *td, struct fio_file *f)
 	struct blk_zone_report *hdr;
 	const struct blk_zone *z;
 	struct fio_zone_info *p;
-	uint64_t zone_size, start_sector;
+	uint64_t zone_size, start_sector, next_online_offset;
 	struct zoned_block_device_info *zbd_info = NULL;
 	pthread_mutexattr_t attr;
 	void *buf;
@@ -1049,6 +1049,18 @@ static int parse_zone_info(struct thread_data *td, struct fio_file *f)
 	}
 	/* a sentinel */
 	zbd_info->zone_info[nr_zones].start = start_sector << 9;
+
+	/* Set offline write pointers to next online zone start
+	 * for sequential skips -- not sure how reverse
+	 * sequentials should work */
+	next_online_offset = f->file_offset;
+	for (int zone_ind = nr_zones - 1; zone_ind >= 0; zone_ind--) {
+		p = &zbd_info->zone_info[zone_ind];
+		if (active_zone(p))
+			next_online_offset = p->start;
+		else
+			p->wp = next_online_offset;
+	}
 
 	f->zbd_info = zbd_info;
 	f->zbd_info->zone_size = zone_size;
@@ -1895,10 +1907,11 @@ void setup_zbd_zone_mode(struct thread_data *td, struct io_u *io_u)
 enum io_u_action zbd_adjust_block(struct thread_data *td, struct io_u *io_u)
 {
 	struct fio_file *f = io_u->file;
-	uint32_t zone_idx_b;
+	uint32_t zone_idx_b, zone_idx_l, zone_idx;
 	struct fio_zone_info *zb, *zl, *orig_zb;
 	uint32_t orig_len = io_u->buflen;
 	uint32_t min_bs = td->o.min_bs[io_u->ddir];
+	uint8_t same_type;
 	uint64_t new_len;
 	int64_t range;
 
@@ -1910,24 +1923,35 @@ enum io_u_action zbd_adjust_block(struct thread_data *td, struct io_u *io_u)
 	zone_idx_b = zbd_zone_idx(f, io_u->offset);
 	zb = &f->zbd_info->zone_info[zone_idx_b];
 	orig_zb = zb;
+	same_type = 1;
+	zone_idx_l = zbd_zone_idx(f, io_u->offset + io_u->buflen);
 
-	if (!active_zone(zb)) {
-		// Allow sequential jobs to skip this zone
-		if (zb->wp == 0)
-			f->last_pos[io_u->ddir] = f->file_offset;
-		else
-			f->last_pos[io_u->ddir] = zb->wp;
-		return io_u_retry;
+	for (zone_idx = zone_idx_b; zone_idx <= zone_idx_l; zone_idx++) {
+		// Use zl as a temporary zone
+		zl = &f->zbd_info->zone_info[zone_idx];
+		if (zl->type != zb->type)
+			same_type = 0;
+		/* TODO: Handle acceptable multiple zone type IO */
+		if (same_type == 0 || !active_zone(zl)) {
+			// Handle the sentinel by moving last_pos to the file offset
+			if (zl->wp == 0 && zl->start != 0)
+				f->last_pos[io_u->ddir] = f->file_offset;
+			// Allow sequential jobs to skip to next online zone
+			else
+				f->last_pos[io_u->ddir] = zl->wp;
+			return io_u_retry;
+		}
 	}
-	/* Accept the I/O offset for conventional zones. */
-	else if (zb->type == BLK_ZONE_TYPE_CONVENTIONAL)
+
+	/* Accept the I/O offset for all conventional zones. */
+	if (zb->type == BLK_ZONE_TYPE_CONVENTIONAL)
 		return io_u_accept;
 
 	/*
 	 * Accept the I/O offset for reads if reading beyond the write pointer
 	 * is enabled.
 	 */
-	if (active_zone(zb) && io_u->ddir == DDIR_READ && td->o.read_beyond_wp)
+	if (io_u->ddir == DDIR_READ && td->o.read_beyond_wp)
 		return io_u_accept;
 
 	zbd_check_swd(f);
@@ -2018,7 +2042,7 @@ enum io_u_action zbd_adjust_block(struct thread_data *td, struct io_u *io_u)
 			zone_idx_b = zb - f->zbd_info->zone_info;
 		}
 		/* If this is a filled FLEX zone, treat it like a conventional
-		 * from now on
+		 * from now on. TODO: What if write overflows to another zone?
 		 */
 		if (zb->type == FLEX_ZONE_TYPE && zb->wp >= zb->start + f->zbd_info->zone_size) {
 			zb->type = BLK_ZONE_TYPE_CONVENTIONAL;
