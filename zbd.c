@@ -1924,7 +1924,7 @@ enum io_u_action zbd_adjust_block(struct thread_data *td, struct io_u *io_u)
 	zb = &f->zbd_info->zone_info[zone_idx_b];
 	orig_zb = zb;
 	same_type = 1;
-	zone_idx_l = zbd_zone_idx(f, io_u->offset + io_u->buflen);
+	zone_idx_l = zbd_zone_idx(f, io_u->offset + io_u->buflen - 1);
 
 	for (zone_idx = zone_idx_b; zone_idx <= zone_idx_l; zone_idx++) {
 		// Use zl as a temporary zone
@@ -2046,7 +2046,8 @@ enum io_u_action zbd_adjust_block(struct thread_data *td, struct io_u *io_u)
 		 */
 		if (zb->type == FLEX_ZONE_TYPE && zb->wp >= zb->start + f->zbd_info->zone_size) {
 			zb->type = BLK_ZONE_TYPE_CONVENTIONAL;
-			zb->wp = zb->start;
+			zb->wp = zb->start + f->zbd_info->zone_size;
+			dprint(FD_ZBD, "Upgrading FMR zone to conventional since it's full now\n");
 			goto accept;
 		}
 		/* Check whether the zone reset threshold has been exceeded */
