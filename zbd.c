@@ -568,7 +568,9 @@ static bool zbd_is_seq_job(struct fio_file *f)
 	zone_idx_e = zbd_zone_idx(f, f->file_offset + f->io_size - 1);
 	for (zone_idx = zone_idx_b; zone_idx <= zone_idx_e; zone_idx++)
 		if (f->zbd_info->zone_info[zone_idx].type ==
-		    BLK_ZONE_TYPE_SEQWRITE_REQ)
+		    BLK_ZONE_TYPE_SEQWRITE_REQ ||
+		    f->zbd_info->zone_info[zone_idx].type ==
+		    FLEX_ZONE_TYPE)
 			return true;
 
 	return false;
@@ -1815,7 +1817,7 @@ static void zbd_put_io(const struct io_u *io_u)
 	assert(zone_idx < zbd_info->nr_zones);
 	z = &zbd_info->zone_info[zone_idx];
 
-	if (z->type != BLK_ZONE_TYPE_SEQWRITE_REQ)
+	if (z->type != BLK_ZONE_TYPE_SEQWRITE_REQ && z->type != FLEX_ZONE_TYPE)
 		return;
 
 	dprint(FD_ZBD,
