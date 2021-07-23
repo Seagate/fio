@@ -572,7 +572,6 @@ static bool zbd_is_seq_job(struct fio_file *f)
 		    f->zbd_info->zone_info[zone_idx].type ==
 		    FLEX_ZONE_TYPE)
 			return true;
-
 	return false;
 }
 
@@ -587,8 +586,10 @@ static bool zbd_verify_sizes(void)
 	uint64_t new_offset, new_end;
 	uint32_t zone_idx;
 	int i, j;
+	uint8_t zoned_mode_needed;
 
 	for_each_td(td, i) {
+		zoned_mode_needed = 0;
 		for_each_file(td, f, j) {
 			if (!f->zbd_info)
 				continue;
@@ -596,6 +597,8 @@ static bool zbd_verify_sizes(void)
 				continue;
 			if (!zbd_is_seq_job(f))
 				continue;
+
+			zoned_mode_needed = 1;
 
 			if (!td->o.zone_size) {
 				td->o.zone_size = f->zbd_info->zone_size;
@@ -649,6 +652,14 @@ static bool zbd_verify_sizes(void)
 					 (unsigned long long) new_end - f->file_offset);
 				f->io_size = new_end - f->file_offset;
 			}
+		}
+		/*
+		If none of the files require zoned handling, maybe we should turn off the zone mode the
+		user requested?
+		*/
+		if (!zoned_mode_needed) {
+			dprint(FD_ZBD, "thread doesn't seem to need zoned handling, zone_size = %llu\n", td->o.zone_size);
+			// td->o.zone_mode = ZONE_MODE_NONE;
 		}
 	}
 
@@ -984,6 +995,7 @@ static int parse_zone_info(struct thread_data *td, struct fio_file *f)
 		goto close;
 	}
 
+
 	dprint(FD_ZBD, "Device %s has %d zones of size %llu KB\n", f->file_name,
 	       nr_zones, (unsigned long long) zone_size / 1024);
 
@@ -1140,6 +1152,7 @@ static int zbd_init_zone_info(struct thread_data *td, struct fio_file *file)
 	struct fio_file *f2;
 	int i, j, ret;
 
+	/* Look to see if zone info has already been gathered for this file */
 	for_each_td(td2, i) {
 		for_each_file(td2, f2, j) {
 			if (td2 == td && f2 == file)
@@ -1149,6 +1162,8 @@ static int zbd_init_zone_info(struct thread_data *td, struct fio_file *file)
 				continue;
 			file->zbd_info = f2->zbd_info;
 			file->zbd_info->refcount++;
+			if (td != td2 && td->o.zone_size == 0)
+				td->o.zone_size = td2->o.zone_size;
 			return 0;
 		}
 	}
