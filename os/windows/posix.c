@@ -168,7 +168,7 @@ int win_to_posix_error(DWORD winerr)
 	case ERROR_FILE_INVALID:
 		return ENXIO;
 	default:
-		log_err("fio: windows error %d not handled\n", winerr);
+		log_err("fio: windows error %lu not handled\n", winerr);
 		return EIO;
 	}
 
@@ -188,7 +188,8 @@ int GetNumLogicalProcessors(void)
 		if (error == ERROR_INSUFFICIENT_BUFFER)
 			processor_info = malloc(len);
 		else {
-			log_err("Error: GetLogicalProcessorInformation failed: %d\n", error);
+			log_err("Error: GetLogicalProcessorInformation failed: %lu\n",
+				error);
 			return -1;
 		}
 
@@ -750,7 +751,7 @@ int setgid(gid_t gid)
 int nice(int incr)
 {
 	DWORD prioclass = NORMAL_PRIORITY_CLASS;
-	
+
 	if (incr < -15)
 		prioclass = HIGH_PRIORITY_CLASS;
 	else if (incr < 0)
@@ -759,7 +760,7 @@ int nice(int incr)
 		prioclass = IDLE_PRIORITY_CLASS;
 	else if (incr > 0)
 		prioclass = BELOW_NORMAL_PRIORITY_CLASS;
-	
+
 	if (!SetPriorityClass(GetCurrentProcess(), prioclass))
 		log_err("fio: SetPriorityClass failed\n");
 
@@ -883,7 +884,7 @@ int poll(struct pollfd fds[], nfds_t nfds, int timeout)
 	FD_ZERO(&exceptfds);
 
 	for (i = 0; i < nfds; i++) {
-		if (fds[i].fd < 0) {
+		if (fds[i].fd == INVALID_SOCKET) {
 			fds[i].revents = 0;
 			continue;
 		}
@@ -900,7 +901,7 @@ int poll(struct pollfd fds[], nfds_t nfds, int timeout)
 
 	if (rc != SOCKET_ERROR) {
 		for (i = 0; i < nfds; i++) {
-			if (fds[i].fd < 0)
+			if (fds[i].fd == INVALID_SOCKET)
 				continue;
 
 			if ((fds[i].events & POLLIN) && FD_ISSET(fds[i].fd, &readfds))
@@ -1025,90 +1026,3 @@ in_addr_t inet_network(const char *cp)
 	hbo = ((nbo & 0xFF) << 24) + ((nbo & 0xFF00) << 8) + ((nbo & 0xFF0000) >> 8) + ((nbo & 0xFF000000) >> 24);
 	return hbo;
 }
-
-#ifdef CONFIG_WINDOWS_XP
-const char *inet_ntop(int af, const void *restrict src, char *restrict dst,
-		      socklen_t size)
-{
-	INT status = SOCKET_ERROR;
-	WSADATA wsd;
-	char *ret = NULL;
-
-	if (af != AF_INET && af != AF_INET6) {
-		errno = EAFNOSUPPORT;
-		return NULL;
-	}
-
-	WSAStartup(MAKEWORD(2,2), &wsd);
-
-	if (af == AF_INET) {
-		struct sockaddr_in si;
-		DWORD len = size;
-
-		memset(&si, 0, sizeof(si));
-		si.sin_family = af;
-		memcpy(&si.sin_addr, src, sizeof(si.sin_addr));
-		status = WSAAddressToString((struct sockaddr*)&si, sizeof(si), NULL, dst, &len);
-	} else if (af == AF_INET6) {
-		struct sockaddr_in6 si6;
-		DWORD len = size;
-
-		memset(&si6, 0, sizeof(si6));
-		si6.sin6_family = af;
-		memcpy(&si6.sin6_addr, src, sizeof(si6.sin6_addr));
-		status = WSAAddressToString((struct sockaddr*)&si6, sizeof(si6), NULL, dst, &len);
-	}
-
-	if (status != SOCKET_ERROR)
-		ret = dst;
-	else
-		errno = ENOSPC;
-
-	WSACleanup();
-
-	return ret;
-}
-
-int inet_pton(int af, const char *restrict src, void *restrict dst)
-{
-	INT status = SOCKET_ERROR;
-	WSADATA wsd;
-	int ret = 1;
-
-	if (af != AF_INET && af != AF_INET6) {
-		errno = EAFNOSUPPORT;
-		return -1;
-	}
-
-	WSAStartup(MAKEWORD(2,2), &wsd);
-
-	if (af == AF_INET) {
-		struct sockaddr_in si;
-		INT len = sizeof(si);
-
-		memset(&si, 0, sizeof(si));
-		si.sin_family = af;
-		status = WSAStringToAddressA((char*)src, af, NULL, (struct sockaddr*)&si, &len);
-		if (status != SOCKET_ERROR)
-			memcpy(dst, &si.sin_addr, sizeof(si.sin_addr));
-	} else if (af == AF_INET6) {
-		struct sockaddr_in6 si6;
-		INT len = sizeof(si6);
-
-		memset(&si6, 0, sizeof(si6));
-		si6.sin6_family = af;
-		status = WSAStringToAddressA((char*)src, af, NULL, (struct sockaddr*)&si6, &len);
-		if (status != SOCKET_ERROR)
-			memcpy(dst, &si6.sin6_addr, sizeof(si6.sin6_addr));
-	}
-
-	if (status == SOCKET_ERROR) {
-		errno = ENOSPC;
-		ret = 0;
-	}
-
-	WSACleanup();
-
-	return ret;
-}
-#endif /* CONFIG_WINDOWS_XP */

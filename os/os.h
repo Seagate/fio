@@ -7,6 +7,7 @@
 #include <pthread.h>
 #include <unistd.h>
 #include <stdlib.h>
+#include <errno.h>
 
 #include "../arch/arch.h" /* IWYU pragma: export */
 #include "../lib/types.h"
@@ -56,6 +57,10 @@ typedef enum {
 #include "os-dragonfly.h"
 #else
 #error "unsupported os"
+#endif
+
+#ifndef EDQUOT
+#define EDQUOT	EIO
 #endif
 
 #ifdef CONFIG_POSIXAIO
@@ -112,7 +117,11 @@ static inline int fio_cpus_split(os_cpu_mask_t *mask, unsigned int cpu_index)
 extern int fio_cpus_split(os_cpu_mask_t *mask, unsigned int cpu);
 #endif
 
+#ifndef FIO_HAVE_IOPRIO_CLASS
+#define ioprio_value_is_class_rt(prio)	(false)
+#endif
 #ifndef FIO_HAVE_IOPRIO
+#define ioprio_value(prioclass, prio)	(0)
 #define ioprio_set(which, who, prioclass, prio)	(0)
 #endif
 
@@ -152,10 +161,6 @@ extern int fio_cpus_split(os_cpu_mask_t *mask, unsigned int cpu);
 #define OS_RAND_MAX			RAND_MAX
 #endif
 
-#ifndef FIO_HAVE_RAWBIND
-#define fio_lookup_raw(dev, majdev, mindev)	1
-#endif
-
 #ifndef FIO_PREFERRED_ENGINE
 #define FIO_PREFERRED_ENGINE	"psync"
 #endif
@@ -170,10 +175,6 @@ extern int fio_cpus_split(os_cpu_mask_t *mask, unsigned int cpu);
 #else
 #define FIO_PREFERRED_CLOCK_SOURCE	CS_GTOD
 #endif
-#endif
-
-#ifndef FIO_MAX_JOBS
-#define FIO_MAX_JOBS		4096
 #endif
 
 #ifndef CONFIG_SOCKLEN_T
@@ -409,6 +410,15 @@ static inline bool os_cpu_has(cpu_features feature)
 
 #ifndef FIO_EMULATED_MKDIR_TWO
 # define fio_mkdir(path, mode)	mkdir(path, mode)
+#endif
+
+#ifdef _SC_CLK_TCK
+static inline void os_clk_tck(long *clk_tck)
+{
+	*clk_tck = sysconf(_SC_CLK_TCK);
+}
+#else
+extern void os_clk_tck(long *clk_tck);
 #endif
 
 #endif /* FIO_OS_H */

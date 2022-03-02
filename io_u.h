@@ -11,9 +11,6 @@
 #ifdef CONFIG_LIBAIO
 #include <libaio.h>
 #endif
-#ifdef CONFIG_GUASI
-#include <guasi.h>
-#endif
 
 enum fio_q_status;
 
@@ -26,7 +23,7 @@ enum {
 	IO_U_F_TRIMMED		= 1 << 5,
 	IO_U_F_BARRIER		= 1 << 6,
 	IO_U_F_VER_LIST		= 1 << 7,
-	IO_U_F_PRIORITY		= 1 << 8,
+	IO_U_F_HIGH_PRIO	= 1 << 8,
 };
 
 /*
@@ -53,10 +50,16 @@ struct io_u {
 	unsigned short numberio;
 
 	/*
+	 * IO priority.
+	 */
+	unsigned short ioprio;
+
+	/*
 	 * Allocated/set buffer and length
 	 */
 	unsigned long long buflen;
-	unsigned long long offset;
+	unsigned long long offset;	/* is really ->xfer_offset... */
+	unsigned long long verify_offset;	/* is really ->offset */
 	void *buf;
 
 	/*
@@ -96,7 +99,6 @@ struct io_u {
 		struct workqueue_work work;
 	};
 
-#ifdef CONFIG_LINUX_BLKZONED
 	/*
 	 * ZBD mode zbd_queue_io callback: called after engine->queue operation
 	 * to advance a zone write pointer and eventually unlock the I/O zone.
@@ -104,14 +106,14 @@ struct io_u {
 	 * @success == true means that the I/O operation has been queued or
 	 * completed successfully.
 	 */
-	void (*zbd_queue_io)(struct io_u *, int q, bool success);
+	void (*zbd_queue_io)(struct thread_data *td, struct io_u *, int q,
+			     bool success);
 
 	/*
 	 * ZBD mode zbd_put_io callback: called in after completion of an I/O
 	 * or commit of an async I/O to unlock the I/O target zone.
 	 */
-	void (*zbd_put_io)(const struct io_u *);
-#endif
+	void (*zbd_put_io)(struct thread_data *td, const struct io_u *);
 
 	/*
 	 * Callback for io completion
@@ -127,9 +129,6 @@ struct io_u {
 #endif
 #ifdef FIO_HAVE_SGIO
 		struct sg_io_hdr hdr;
-#endif
-#ifdef CONFIG_GUASI
-		guasi_req_t greq;
 #endif
 #ifdef CONFIG_SOLARISAIO
 		aio_result_t resultp;
@@ -197,7 +196,6 @@ static inline enum fio_ddir acct_ddir(struct io_u *io_u)
 	td_flags_clear((td), &(io_u->flags), (val))
 #define io_u_set(td, io_u, val)		\
 	td_flags_set((td), &(io_u)->flags, (val))
-#define io_u_is_prio(io_u)	\
-	(io_u->flags & (unsigned int) IO_U_F_PRIORITY) != 0
+#define io_u_is_high_prio(io_u)	(io_u->flags & IO_U_F_HIGH_PRIO)
 
 #endif

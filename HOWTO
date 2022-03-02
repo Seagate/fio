@@ -544,6 +544,9 @@ Parameter types
 		* *Ti* -- means tebi (Ti) or 1024**4
 		* *Pi* -- means pebi (Pi) or 1024**5
 
+	For Zone Block Device Mode:
+	        * *z*  -- means Zone
+
 	With :option:`kb_base`\=1024 (the default), the unit prefixes are opposite
 	from those specified in the SI and IEC 80000-13 standards to provide
 	compatibility with old scripts.  For example, 4k means 4096.
@@ -809,6 +812,8 @@ Target file/device
 
 		**$jobname**
 				The name of the worker thread or process.
+		**$clientuid**
+				IP of the fio process when using client/server mode.
 		**$jobnum**
 				The incremental number of the worker thread or process.
 		**$filenum**
@@ -970,14 +975,15 @@ Target file/device
 	Accepted values are:
 
 		**none**
-				The :option:`zonerange`, :option:`zonesize` and
-				:option:`zoneskip` parameters are ignored.
+				The :option:`zonerange`, :option:`zonesize`,
+				:option `zonecapacity` and option:`zoneskip`
+				parameters are ignored.
 		**strided**
 				I/O happens in a single zone until
 				:option:`zonesize` bytes have been transferred.
 				After that number of bytes has been
 				transferred processing of the next zone
-				starts.
+				starts. :option `zonecapacity` is ignored.
 		**zbd**
 				Zoned block device mode. I/O happens
 				sequentially in each zone, even if random I/O
@@ -986,6 +992,9 @@ Target file/device
 				single zone. The :option:`zoneskip` parameter
 				is ignored. :option:`zonerange` and
 				:option:`zonesize` must be identical.
+				Trim is handled using a zone reset operation.
+				Trim only considers non-empty sequential write
+				required and sequential write preferred zones.
 
 .. option:: zonerange=int
 
@@ -1003,6 +1012,17 @@ Target file/device
 
 	For :option:`zonemode` =zbd, this is the size of a single zone. The
 	:option:`zonerange` parameter is ignored in this mode.
+
+
+.. option:: zonecapacity=int
+
+	For :option:`zonemode` =zbd, this defines the capacity of a single zone,
+	which is the accessible area starting from the zone start address.
+	This parameter only applies when using :option:`zonemode` =zbd in
+	combination with regular block devices. If not specified it defaults to
+	the zone size. If the target device is a zoned block device, the zone
+	capacity is obtained from the device information and this option is
+	ignored.
 
 .. option:: zoneskip=int
 
@@ -1037,6 +1057,17 @@ Target file/device
 	command line option that allows to limit the number of open zones. The
 	number of open zones is defined as the number of zones to which write
 	commands are issued.
+
+.. option:: job_max_open_zones=int
+
+	Limit on the number of simultaneously opened zones per single
+	thread/process.
+
+.. option:: ignore_zone_limits=bool
+	If this option is used, fio will ignore the maximum number of open
+	zones limit of the zoned block device in use, thus allowing the
+	option :option:`max_open_zones` value to be larger than the device
+	reported limit. Default: false.
 
 .. option:: zone_reset_threshold=float
 
@@ -1132,11 +1163,31 @@ I/O type
 	behaves in a similar fashion, except it sends the same offset 8 number of
 	times before generating a new offset.
 
-.. option:: unified_rw_reporting=bool
+.. option:: unified_rw_reporting=str
 
 	Fio normally reports statistics on a per data direction basis, meaning that
-	reads, writes, and trims are accounted and reported separately. If this
-	option is set fio sums the results and report them as "mixed" instead.
+	reads, writes, and trims are accounted and reported separately. This option
+	determines whether fio reports the results normally, summed together, or as
+	both options.
+	Accepted values are:
+
+		**none**
+			Normal statistics reporting.
+
+		**mixed**
+			Statistics are summed per data direction and reported together.
+
+		**both**
+			Statistics are reported normally, followed by the mixed statistics.
+
+		**0**
+			Backward-compatible alias for **none**.
+
+		**1**
+			Backward-compatible alias for **mixed**.
+
+		**2**
+			Alias for **both**.
 
 .. option:: randrepeat=bool
 
@@ -1243,13 +1294,14 @@ I/O type
 .. option:: offset=int
 
 	Start I/O at the provided offset in the file, given as either a fixed size in
-	bytes or a percentage. If a percentage is given, the generated offset will be
+	bytes, zones or a percentage. If a percentage is given, the generated offset will be
 	aligned to the minimum ``blocksize`` or to the value of ``offset_align`` if
 	provided. Data before the given offset will not be touched. This
 	effectively caps the file size at `real_size - offset`. Can be combined with
 	:option:`size` to constrain the start and end range of the I/O workload.
 	A percentage can be specified by a number between 1 and 100 followed by '%',
-	for example, ``offset=20%`` to specify 20%.
+	for example, ``offset=20%`` to specify 20%. In ZBD mode, value can be set as
+        number of zones using 'z'.
 
 .. option:: offset_align=int
 
@@ -1266,7 +1318,8 @@ I/O type
 	intended to operate on a file in parallel disjoint segments, with even
 	spacing between the starting points. Percentages can be used for this option.
 	If a percentage is given, the generated offset will be aligned to the minimum
-	``blocksize`` or to the value of ``offset_align`` if provided.
+	``blocksize`` or to the value of ``offset_align`` if provided. In ZBD mode, value can
+	also be set as number of zones using 'z'.
 
 .. option:: number_ios=int
 
@@ -1349,7 +1402,7 @@ I/O type
 	limit reads or writes to a certain rate.  If that is the case, then the
 	distribution may be skewed. Default: 50.
 
-.. option:: random_distribution=str:float[,str:float][,str:float]
+.. option:: random_distribution=str:float[:float][,str:float][,str:float]
 
 	By default, fio will use a completely uniform random distribution when asked
 	to perform random I/O. Sometimes it is useful to skew the distribution in
@@ -1383,6 +1436,14 @@ I/O type
 	option. If a non-uniform model is used, fio will disable use of the random
 	map. For the **normal** distribution, a normal (Gaussian) deviation is
 	supplied as a value between 0 and 100.
+
+	The second, optional float is allowed for **pareto**, **zipf** and **normal** distributions.
+	It allows to set base of distribution in non-default place, giving more control
+	over most probable outcome. This value is in range [0-1] which maps linearly to
+	range of possible random values.
+	Defaults are: random for **pareto** and **zipf**, and 0.5 for **normal**.
+	If you wanted to use **zipf** with a `theta` of 1.2 centered on 1/4 of allowed value range,
+	you would use ``random_distibution=zipf:1.2:0.25``.
 
 	For a **zoned** distribution, fio supports specifying percentages of I/O
 	access that should fall within what range of the file or device. For
@@ -1658,6 +1719,36 @@ Buffers and memory
 	this option will also enable :option:`refill_buffers` to prevent every buffer
 	being identical.
 
+.. option:: dedupe_mode=str
+
+	If ``dedupe_percentage=<int>`` is given, then this option controls how fio
+	generates the dedupe buffers.
+
+		**repeat**
+			Generate dedupe buffers by repeating previous writes
+		**working_set**
+			Generate dedupe buffers from working set
+
+	``repeat`` is the default option for fio. Dedupe buffers are generated
+	by repeating previous unique write.
+
+	``working_set`` is a more realistic workload.
+	With ``working_set``, ``dedupe_working_set_percentage=<int>`` should be provided.
+	Given that, fio will use the initial unique write buffers as its working set.
+	Upon deciding to dedupe, fio will randomly choose a buffer from the working set.
+	Note that by using ``working_set`` the dedupe percentage will converge
+	to the desired over time while ``repeat`` maintains the desired percentage
+	throughout the job.
+
+.. option:: dedupe_working_set_percentage=int
+
+	If ``dedupe_mode=<str>`` is set to ``working_set``, then this controls
+	the percentage of size of the file or device used as the buffers
+	fio will choose to generate the dedupe buffers from
+
+	Note that size needs to be explicitly provided and only 1 file per
+	job is supported
+
 .. option:: invalidate=bool
 
 	Invalidate the buffer/page cache parts of the files to be used prior to
@@ -1665,10 +1756,28 @@ Buffers and memory
 	This will be ignored if :option:`pre_read` is also specified for the
 	same job.
 
-.. option:: sync=bool
+.. option:: sync=str
 
-	Use synchronous I/O for buffered writes. For the majority of I/O engines,
-	this means using O_SYNC. Default: false.
+	Whether, and what type, of synchronous I/O to use for writes.  The allowed
+	values are:
+
+		**none**
+			Do not use synchronous IO, the default.
+
+		**0**
+			Same as **none**.
+
+		**sync**
+			Use synchronous file IO. For the majority of I/O engines,
+			this means using O_SYNC.
+
+		**1**
+			Same as **sync**.
+
+		**dsync**
+			Use synchronous data IO. For the majority of I/O engines,
+			this means using O_DSYNC.
+
 
 .. option:: iomem=str, mem=str
 
@@ -1759,6 +1868,7 @@ I/O size
 	files or devices.  If the files do not exist, size must be given. It is also
 	possible to give size as a percentage between 1 and 100. If ``size=20%`` is
 	given, fio will use 20% of the full size of the given files or devices.
+	In ZBD mode, value can also be set as number of zones using 'z'.
 	Can be combined with :option:`offset` to constrain the start and end range
 	that I/O will be done within.
 
@@ -1792,7 +1902,8 @@ I/O size
 .. option:: fill_device=bool, fill_fs=bool
 
 	Sets size to something really large and waits for ENOSPC (no space left on
-	device) as the terminating condition. Only makes sense with sequential
+	device) or EDQUOT (disk quota exceeded)
+	as the terminating condition. Only makes sense with sequential
 	write. For a read workload, the mount point will be filled first then I/O
 	started on the result. This option doesn't make sense if operating on a raw
 	device node, since the size of that is already known by the file system.
@@ -1863,6 +1974,11 @@ I/O engine
 			character devices. This engine supports trim operations.
 			The sg engine includes engine specific options.
 
+		**libzbc**
+			Read, write, trim and ZBC/ZAC operations to a zoned
+			block device using libzbc library. The target can be
+			either an SG character device or a block device file.
+
 		**null**
 			Doesn't transfer any data, just pretends to.  This is mainly used to
 			exercise fio itself and for debugging/testing purposes.
@@ -1882,20 +1998,14 @@ I/O engine
 
 		**cpuio**
 			Doesn't transfer any data, but burns CPU cycles according to the
-			:option:`cpuload` and :option:`cpuchunks` options. Setting
-			:option:`cpuload`\=85 will cause that job to do nothing but burn 85%
+			:option:`cpuload`, :option:`cpuchunks` and :option:`cpumode` options.
+			Setting :option:`cpuload`\=85 will cause that job to do nothing but burn 85%
 			of the CPU. In case of SMP machines, use :option:`numjobs`\=<nr_of_cpu>
 			to get desired CPU usage, as the cpuload only loads a
 			single CPU at the desired rate. A job never finishes unless there is
 			at least one non-cpuio job.
-
-		**guasi**
-			The GUASI I/O engine is the Generic Userspace Asynchronous Syscall
-			Interface approach to async I/O. See
-
-			http://www.xmailserver.org/guasi-lib.html
-
-			for more info on GUASI.
+			Setting :option:`cpumode`\=qsort replace the default noop instructions loop
+			by a qsort algorithm to consume more energy.
 
 		**rdma**
 			The RDMA I/O engine supports both RDMA memory semantics
@@ -2001,6 +2111,11 @@ I/O engine
 			and 'nrfiles', so that files will be created.
 			This engine is to measure file lookup and meta data access.
 
+		**filedelete**
+			Simply delete the files by unlink() and do no I/O to them. You need to set 'filesize'
+			and 'nrfiles', so that the files will be created.
+			This engine is to measure file delete.
+
 		**libpmem**
 			Read and write using mmap I/O to a file on a filesystem
 			mounted with DAX on a persistent memory device through the PMDK
@@ -2026,6 +2141,26 @@ I/O engine
 		**nbd**
 			Read and write a Network Block Device (NBD).
 
+		**libcufile**
+			I/O engine supporting libcufile synchronous access to nvidia-fs and a
+			GPUDirect Storage-supported filesystem. This engine performs
+			I/O without transferring buffers between user-space and the kernel,
+			unless :option:`verify` is set or :option:`cuda_io` is `posix`.
+			:option:`iomem` must not be `cudamalloc`. This ioengine defines
+			engine specific options.
+		**dfs**
+			I/O engine supporting asynchronous read and write operations to the
+			DAOS File System (DFS) via libdfs.
+
+		**nfs**
+			I/O engine supporting asynchronous read and write operations to
+			NFS filesystems from userspace via libnfs. This is useful for
+			achieving higher concurrency and thus throughput than is possible
+			via kernel NFS.
+
+		**exec**
+			Execute 3rd party tools. Could be used to perform monitoring during jobs runtime.
+
 I/O engine specific parameters
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -2034,13 +2169,52 @@ In addition, there are some parameters which are only valid when a specific
 with the caveat that when used on the command line, they must come after the
 :option:`ioengine` that defines them is selected.
 
-.. option:: cmdprio_percentage=int : [io_uring] [libaio]
+.. option:: cmdprio_percentage=int[,int] : [io_uring] [libaio]
 
-    Set the percentage of I/O that will be issued with higher priority by setting
-    the priority bit. Non-read I/O is likely unaffected by ``cmdprio_percentage``.
-    This option cannot be used with the `prio` or `prioclass` options. For this
-    option to set the priority bit properly, NCQ priority must be supported and
-    enabled and :option:`direct`\=1 option must be used.
+    Set the percentage of I/O that will be issued with the highest priority.
+    Default: 0. A single value applies to reads and writes. Comma-separated
+    values may be specified for reads and writes. For this option to be
+    effective, NCQ priority must be supported and enabled, and `direct=1'
+    option must be used. fio must also be run as the root user. Unlike
+    slat/clat/lat stats, which can be tracked and reported independently, per
+    priority stats only track and report a single type of latency. By default,
+    completion latency (clat) will be reported, if :option:`lat_percentiles` is
+    set, total latency (lat) will be reported.
+
+.. option:: cmdprio_class=int[,int] : [io_uring] [libaio]
+
+	Set the I/O priority class to use for I/Os that must be issued with
+	a priority when :option:`cmdprio_percentage` or
+	:option:`cmdprio_bssplit` is set. If not specified when
+	:option:`cmdprio_percentage` or :option:`cmdprio_bssplit` is set,
+	this defaults to the highest priority class. A single value applies
+	to reads and writes. Comma-separated values may be specified for
+	reads and writes. See :manpage:`ionice(1)`. See also the
+	:option:`prioclass` option.
+
+.. option:: cmdprio=int[,int] : [io_uring] [libaio]
+
+	Set the I/O priority value to use for I/Os that must be issued with
+	a priority when :option:`cmdprio_percentage` or
+	:option:`cmdprio_bssplit` is set. If not specified when
+	:option:`cmdprio_percentage` or :option:`cmdprio_bssplit` is set,
+	this defaults to 0.
+	Linux limits us to a positive value between 0 and 7, with 0 being the
+	highest. A single value applies to reads and writes. Comma-separated
+	values may be specified for reads and writes. See :manpage:`ionice(1)`.
+	Refer to an appropriate manpage for other operating systems since
+	meaning of priority may differ. See also the :option:`prio` option.
+
+.. option:: cmdprio_bssplit=str[,str] : [io_uring] [libaio]
+	To get a finer control over I/O priority, this option allows
+	specifying the percentage of IOs that must have a priority set
+	depending on the block size of the IO. This option is useful only
+	when used together with the :option:`bssplit` option, that is,
+	multiple different block sizes are used for reads and writes.
+	The format for this option is the same as the format of the
+	:option:`bssplit` option, with the exception that values for
+	trim IOs are ignored. This option is mutually exclusive with the
+	:option:`cmdprio_percentage` option.
 
 .. option:: fixedbufs : [io_uring]
 
@@ -2096,6 +2270,26 @@ with the caveat that when used on the command line, they must come after the
 	When hipri is set this determines the probability of a pvsync2 I/O being high
 	priority. The default is 100%.
 
+.. option:: nowait : [pvsync2] [libaio] [io_uring]
+
+	By default if a request cannot be executed immediately (e.g. resource starvation,
+	waiting on locks) it is queued and the initiating process will be blocked until
+	the required resource becomes free.
+
+	This option sets the RWF_NOWAIT flag (supported from the 4.14 Linux kernel) and
+	the call will return instantly with EAGAIN or a partial result rather than waiting.
+
+	It is useful to also use ignore_error=EAGAIN when using this option.
+
+	Note: glibc 2.27, 2.28 have a bug in syscall wrappers preadv2, pwritev2.
+	They return EOPNOTSUP instead of EAGAIN.
+
+	For cached I/O, using this option usually means a request operates only with
+	cached data. Currently the RWF_NOWAIT flag does not supported for cached write.
+
+	For direct I/O, requests will only succeed if cache invalidation isn't required,
+	file blocks are fully allocated and the disk request could be issued immediately.
+
 .. option:: cpuload=int : [cpuio]
 
 	Attempt to use the specified percentage of CPU cycles. This is a mandatory
@@ -2126,7 +2320,7 @@ with the caveat that when used on the command line, they must come after the
 		this will be the starting port number since fio will use a range of
 		ports.
 
-   [rdma]
+   [rdma], [librpma_*]
 
 		The port to use for RDMA-CM communication. This should be the same value
 		on the client and the server side.
@@ -2136,6 +2330,20 @@ with the caveat that when used on the command line, they must come after the
 	The hostname or IP address to use for TCP, UDP or RDMA-CM based I/O.  If the job
 	is a TCP listener or UDP reader, the hostname is not used and must be omitted
 	unless it is a valid UDP multicast address.
+
+.. option:: serverip=str : [librpma_*]
+
+	The IP address to be used for RDMA-CM based I/O.
+
+.. option:: direct_write_to_pmem=bool : [librpma_*]
+
+	Set to 1 only when Direct Write to PMem from the remote host is possible.
+	Otherwise, set to 0.
+
+.. option:: busy_wait_polling=bool : [librpma_*_server]
+
+	Set to 0 to wait for completion instead of busy-wait polling completion.
+	Default: 1.
 
 .. option:: interface=str : [netsplice] [net]
 
@@ -2233,6 +2441,12 @@ with the caveat that when used on the command line, they must come after the
         Poll store instead of waiting for completion. Usually this provides better
         throughput at cost of higher(up to 100%) CPU utilization.
 
+.. option:: touch_objects=bool : [rados]
+
+        During initialization, touch (create if do not exist) all objects (files).
+        Touching all objects affects ceph caches and likely impacts test results.
+        Enabled by default.
+
 .. option:: skip_bad=bool : [mtd]
 
 	Skip operations against known bad blocks.
@@ -2298,6 +2512,18 @@ with the caveat that when used on the command line, they must come after the
 		transferred to the device. The writefua option is ignored with this
 		selection.
 
+.. option:: hipri : [sg]
+
+	If this option is set, fio will attempt to use polled IO completions.
+	This will have a similar effect as (io_uring)hipri. Only SCSI READ and
+	WRITE commands will have the SGV4_FLAG_HIPRI set (not UNMAP (trim) nor
+	VERIFY). Older versions of the Linux sg driver that do not support
+	hipri will simply ignore this flag and do normal IO. The Linux SCSI
+	Low Level Driver (LLD) that "owns" the device also needs to support
+	hipri (also known as iopoll and mq_poll). The MegaRAID driver is an
+	example of a SCSI LLD. Default: clear (0) which does normal
+	(interrupted based) IO.
+
 .. option:: http_host=str : [http]
 
 	Hostname to connect to. For S3, this could be the bucket hostname.
@@ -2354,6 +2580,73 @@ with the caveat that when used on the command line, they must come after the
 	Example URIs: nbd://localhost:10809
 	nbd+unix:///?socket=/tmp/socket
 	nbds://tlshost/exportname
+
+.. option:: gpu_dev_ids=str : [libcufile]
+
+	Specify the GPU IDs to use with CUDA. This is a colon-separated list of
+	int. GPUs are assigned to workers roundrobin. Default is 0.
+
+.. option:: cuda_io=str : [libcufile]
+
+	Specify the type of I/O to use with CUDA. Default is **cufile**.
+
+	**cufile**
+		Use libcufile and nvidia-fs. This option performs I/O directly
+		between a GPUDirect Storage filesystem and GPU buffers,
+		avoiding use of a bounce buffer. If :option:`verify` is set,
+		cudaMemcpy is used to copy verificaton data between RAM and GPU.
+		Verification data is copied from RAM to GPU before a write
+		and from GPU to RAM after a read. :option:`direct` must be 1.
+	**posix**
+		Use POSIX to perform I/O with a RAM buffer, and use cudaMemcpy
+		to transfer data between RAM and the GPUs. Data is copied from
+		GPU to RAM before a write and copied from RAM to GPU after a
+		read. :option:`verify` does not affect use of cudaMemcpy.
+
+.. option:: pool=str : [dfs]
+
+	Specify the label or UUID of the DAOS pool to connect to.
+
+.. option:: cont=str : [dfs]
+
+	Specify the label or UUID of the DAOS container to open.
+
+.. option:: chunk_size=int : [dfs]
+
+	Specificy a different chunk size (in bytes) for the dfs file.
+	Use DAOS container's chunk size by default.
+
+.. option:: object_class=str : [dfs]
+
+	Specificy a different object class for the dfs file.
+	Use DAOS container's object class by default.
+
+.. option:: nfs_url=str : [nfs]
+
+	URL in libnfs format, eg nfs://<server|ipv4|ipv6>/path[?arg=val[&arg=val]*]
+	Refer to the libnfs README for more details.
+
+.. option:: program=str : [exec]
+
+	Specify the program to execute.
+
+.. option:: arguments=str : [exec]
+
+	Specify arguments to pass to program.
+	Some special variables can be expanded to pass fio's job details to the program.
+
+	**%r**
+		Replaced by the duration of the job in seconds.
+	**%n**
+		Replaced by the name of the job.
+
+.. option:: grace_time=int : [exec]
+
+	Specify the time between the SIGTERM and SIGKILL signals. Default is 1 second.
+
+.. option:: std_redirect=bool : [exec]
+
+	If set, stdout and stderr streams are redirected to files named from the job name. Default is true.
 
 I/O depth
 ~~~~~~~~~
@@ -2449,7 +2742,8 @@ I/O depth
 	can increase latencies. The benefit is that fio can manage submission rates
 	independently of the device completion rates. This avoids skewed latency
 	reporting if I/O gets backed up on the device side (the coordinated omission
-	problem).
+	problem). Note that this option cannot reliably be used with async IO
+	engines.
 
 
 I/O rate
@@ -2460,7 +2754,7 @@ I/O rate
 	Stall the job for the specified period of time after an I/O has completed before issuing the
 	next. May be used to simulate processing being done by an application.
 	When the unit is omitted, the value is interpreted in microseconds.  See
-	:option:`thinktime_blocks` and :option:`thinktime_spin`.
+	:option:`thinktime_blocks`, :option:`thinktime_iotime` and :option:`thinktime_spin`.
 
 .. option:: thinktime_spin=time
 
@@ -2477,6 +2771,25 @@ I/O rate
 	queue depth setting redundant, since no more than 1 I/O will be queued
 	before we have to complete it and do our :option:`thinktime`. In other words, this
 	setting effectively caps the queue depth if the latter is larger.
+
+.. option:: thinktime_blocks_type=str
+
+	Only valid if :option:`thinktime` is set - control how :option:`thinktime_blocks`
+	triggers. The default is `complete`, which triggers thinktime when fio completes
+	:option:`thinktime_blocks` blocks. If this is set to `issue`, then the trigger happens
+	at the issue side.
+
+.. option:: thinktime_iotime=time
+
+	Only valid if :option:`thinktime` is set - control :option:`thinktime`
+	interval by time. The :option:`thinktime` stall is repeated after IOs
+	are executed for :option:`thinktime_iotime`. For example,
+	``--thinktime_iotime=9s --thinktime=1s`` repeat 10-second cycle with IOs
+	for 9 seconds and stall for 1 second. When the unit is omitted,
+	:option:`thinktime_iotime` is interpreted as a number of seconds. If
+	this option is used together with :option:`thinktime_blocks`, the
+	:option:`thinktime` stall is repeated after :option:`thinktime_iotime`
+	or after :option:`thinktime_blocks` IOs, whichever happens first.
 
 .. option:: rate=int[,int][,int]
 
@@ -2551,11 +2864,19 @@ I/O latency
 	defaults to 100.0, meaning that all I/Os must be equal or below to the value
 	set by :option:`latency_target`.
 
-.. option:: max_latency=time
+.. option:: latency_run=bool
+
+	Used with :option:`latency_target`. If false (default), fio will find
+	the highest queue depth that meets :option:`latency_target` and exit. If
+	true, fio will continue running and try to meet :option:`latency_target`
+	by adjusting queue depth.
+
+.. option:: max_latency=time[,time][,time]
 
 	If set, fio will exit the job with an ETIMEDOUT error if it exceeds this
 	maximum latency. When the unit is omitted, the value is interpreted in
-	microseconds.
+	microseconds. Comma-separated values may be specified for reads, writes,
+	and trims as described in :option:`blocksize`.
 
 .. option:: rate_cycle=int
 
@@ -2585,6 +2906,9 @@ I/O replay
 	character. See the :option:`filename` option for information on how to
 	escape ':' characters within the file names. These files will
 	be sequentially assigned to job clones created by :option:`numjobs`.
+	'-' is a reserved name, meaning read from stdin, notably if
+	:option:`filename` is set to '-' which means stdin as well, then
+	this flag can't be set to '-'.
 
 .. option:: read_iolog_chunked=bool
 
@@ -2706,14 +3030,14 @@ Threads, processes and job synchronization
 	between 0 and 7, with 0 being the highest.  See man
 	:manpage:`ionice(1)`. Refer to an appropriate manpage for other operating
 	systems since meaning of priority may differ. For per-command priority
-	setting, see I/O engine specific `cmdprio_percentage` and `hipri_percentage`
-	options.
+	setting, see I/O engine specific :option:`cmdprio_percentage` and
+	:option:`cmdprio` options.
 
 .. option:: prioclass=int
 
 	Set the I/O priority class. See man :manpage:`ionice(1)`. For per-command
-	priority setting, see I/O engine specific `cmdprio_percentage` and
-	`hipri_percentage` options.
+	priority setting, see I/O engine specific :option:`cmdprio_percentage`
+	and :option:`cmdprio_class` options.
 
 .. option:: cpus_allowed=str
 
@@ -2818,15 +3142,10 @@ Threads, processes and job synchronization
 	``flow=8`` and another job has ``flow=-1``, then there will be a roughly 1:8
 	ratio in how much one runs vs the other.
 
-.. option:: flow_watermark=int
-
-	The maximum value that the absolute value of the flow counter is allowed to
-	reach before the job must wait for a lower value of the counter.
-
 .. option:: flow_sleep=int
 
-	The period of time, in microseconds, to wait after the flow watermark has
-	been exceeded before retrying operations.
+	The period of time, in microseconds, to wait after the flow counter
+	has exceeded its proportion before retrying operations.
 
 .. option:: stonewall, wait_for_previous
 
@@ -3227,6 +3546,18 @@ Measurements and reporting
 	logging (see :option:`log_avg_msec`) has been enabled. See
 	:option:`write_bw_log` for details about the filename format and `Log
 	File Formats`_ for how data is structured within the file.
+
+.. option:: log_entries=int
+
+	By default, fio will log an entry in the iops, latency, or bw log for
+	every I/O that completes. The initial number of I/O log entries is 1024.
+	When the log entries are all used, new log entries are dynamically
+	allocated.  This dynamic log entry allocation may negatively impact
+	time-related statistics such as I/O tail latencies (e.g. 99.9th percentile
+	completion latency). This option allows specifying a larger initial
+	number of log entries to avoid run-time allocations of new log entries,
+	resulting in more precise time-related I/O statistics.
+	Also see :option:`log_avg_msec`. Defaults to 1024.
 
 .. option:: log_avg_msec=int
 
@@ -3884,7 +4215,7 @@ will be a disk utilization section.
 Below is a single line containing short names for each of the fields in the
 minimal output v3, separated by semicolons::
 
-        terse_version_3;fio_version;jobname;groupid;error;read_kb;read_bandwidth;read_iops;read_runtime_ms;read_slat_min;read_slat_max;read_slat_mean;read_slat_dev;read_clat_min;read_clat_max;read_clat_mean;read_clat_dev;read_clat_pct01;read_clat_pct02;read_clat_pct03;read_clat_pct04;read_clat_pct05;read_clat_pct06;read_clat_pct07;read_clat_pct08;read_clat_pct09;read_clat_pct10;read_clat_pct11;read_clat_pct12;read_clat_pct13;read_clat_pct14;read_clat_pct15;read_clat_pct16;read_clat_pct17;read_clat_pct18;read_clat_pct19;read_clat_pct20;read_tlat_min;read_lat_max;read_lat_mean;read_lat_dev;read_bw_min;read_bw_max;read_bw_agg_pct;read_bw_mean;read_bw_dev;write_kb;write_bandwidth;write_iops;write_runtime_ms;write_slat_min;write_slat_max;write_slat_mean;write_slat_dev;write_clat_min;write_clat_max;write_clat_mean;write_clat_dev;write_clat_pct01;write_clat_pct02;write_clat_pct03;write_clat_pct04;write_clat_pct05;write_clat_pct06;write_clat_pct07;write_clat_pct08;write_clat_pct09;write_clat_pct10;write_clat_pct11;write_clat_pct12;write_clat_pct13;write_clat_pct14;write_clat_pct15;write_clat_pct16;write_clat_pct17;write_clat_pct18;write_clat_pct19;write_clat_pct20;write_tlat_min;write_lat_max;write_lat_mean;write_lat_dev;write_bw_min;write_bw_max;write_bw_agg_pct;write_bw_mean;write_bw_dev;cpu_user;cpu_sys;cpu_csw;cpu_mjf;cpu_minf;iodepth_1;iodepth_2;iodepth_4;iodepth_8;iodepth_16;iodepth_32;iodepth_64;lat_2us;lat_4us;lat_10us;lat_20us;lat_50us;lat_100us;lat_250us;lat_500us;lat_750us;lat_1000us;lat_2ms;lat_4ms;lat_10ms;lat_20ms;lat_50ms;lat_100ms;lat_250ms;lat_500ms;lat_750ms;lat_1000ms;lat_2000ms;lat_over_2000ms;disk_name;disk_read_iops;disk_write_iops;disk_read_merges;disk_write_merges;disk_read_ticks;write_ticks;disk_queue_time;disk_util
+        terse_version_3;fio_version;jobname;groupid;error;read_kb;read_bandwidth_kb;read_iops;read_runtime_ms;read_slat_min_us;read_slat_max_us;read_slat_mean_us;read_slat_dev_us;read_clat_min_us;read_clat_max_us;read_clat_mean_us;read_clat_dev_us;read_clat_pct01;read_clat_pct02;read_clat_pct03;read_clat_pct04;read_clat_pct05;read_clat_pct06;read_clat_pct07;read_clat_pct08;read_clat_pct09;read_clat_pct10;read_clat_pct11;read_clat_pct12;read_clat_pct13;read_clat_pct14;read_clat_pct15;read_clat_pct16;read_clat_pct17;read_clat_pct18;read_clat_pct19;read_clat_pct20;read_tlat_min_us;read_lat_max_us;read_lat_mean_us;read_lat_dev_us;read_bw_min_kb;read_bw_max_kb;read_bw_agg_pct;read_bw_mean_kb;read_bw_dev_kb;write_kb;write_bandwidth_kb;write_iops;write_runtime_ms;write_slat_min_us;write_slat_max_us;write_slat_mean_us;write_slat_dev_us;write_clat_min_us;write_clat_max_us;write_clat_mean_us;write_clat_dev_us;write_clat_pct01;write_clat_pct02;write_clat_pct03;write_clat_pct04;write_clat_pct05;write_clat_pct06;write_clat_pct07;write_clat_pct08;write_clat_pct09;write_clat_pct10;write_clat_pct11;write_clat_pct12;write_clat_pct13;write_clat_pct14;write_clat_pct15;write_clat_pct16;write_clat_pct17;write_clat_pct18;write_clat_pct19;write_clat_pct20;write_tlat_min_us;write_lat_max_us;write_lat_mean_us;write_lat_dev_us;write_bw_min_kb;write_bw_max_kb;write_bw_agg_pct;write_bw_mean_kb;write_bw_dev_kb;cpu_user;cpu_sys;cpu_csw;cpu_mjf;cpu_minf;iodepth_1;iodepth_2;iodepth_4;iodepth_8;iodepth_16;iodepth_32;iodepth_64;lat_2us;lat_4us;lat_10us;lat_20us;lat_50us;lat_100us;lat_250us;lat_500us;lat_750us;lat_1000us;lat_2ms;lat_4ms;lat_10ms;lat_20ms;lat_50ms;lat_100ms;lat_250ms;lat_500ms;lat_750ms;lat_1000ms;lat_2000ms;lat_over_2000ms;disk_name;disk_read_iops;disk_write_iops;disk_read_merges;disk_write_merges;disk_read_ticks;write_ticks;disk_queue_time;disk_util
 
 In client/server mode terse output differs from what appears when jobs are run
 locally. Disk utilization data is omitted from the standard terse output and
@@ -4137,7 +4468,7 @@ Fio supports a variety of log file formats, for logging latencies, bandwidth,
 and IOPS. The logs share a common format, which looks like this:
 
     *time* (`msec`), *value*, *data direction*, *block size* (`bytes`),
-    *offset* (`bytes`)
+    *offset* (`bytes`), *command priority*
 
 *Time* for the log entry is always in milliseconds. The *value* logged depends
 on the type of log, it will be one of the following:
@@ -4161,6 +4492,9 @@ on the type of log, it will be one of the following:
 The entry's *block size* is always in bytes. The *offset* is the position in bytes
 from the start of the file for that particular I/O. The logging of the offset can be
 toggled with :option:`log_offset`.
+
+*Command priority* is 0 for normal priority and 1 for high priority. This is controlled
+by the ioengine specific :option:`cmdprio_percentage`.
 
 Fio defaults to logging every individual I/O but when windowed logging is set
 through :option:`log_avg_msec`, either the average (by default) or the maximum

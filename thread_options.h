@@ -31,10 +31,24 @@ enum fio_memtype {
 	MEM_CUDA_MALLOC,/* use GPU memory */
 };
 
+/*
+ * What mode to use for deduped data generation
+ */
+enum dedupe_mode {
+	DEDUPE_MODE_REPEAT = 0,
+	DEDUPE_MODE_WORKING_SET = 1,
+};
+
 #define ERROR_STR_MAX	128
 
 #define BSSPLIT_MAX	64
 #define ZONESPLIT_MAX	256
+
+struct split {
+	unsigned int nr;
+	unsigned long long val1[ZONESPLIT_MAX];
+	unsigned long long val2[ZONESPLIT_MAX];
+};
 
 struct bssplit {
 	uint64_t bs;
@@ -83,12 +97,16 @@ struct thread_options {
 	unsigned long long size;
 	unsigned long long io_size;
 	unsigned int size_percent;
+	unsigned int size_nz;
+	unsigned int io_size_percent;
+	unsigned int io_size_nz;
 	unsigned int fill_device;
 	unsigned int file_append;
 	unsigned long long file_size_low;
 	unsigned long long file_size_high;
 	unsigned long long start_offset;
 	unsigned long long start_offset_align;
+	unsigned int start_offset_nz;
 
 	unsigned long long bs[DDIR_RWDIR_CNT];
 	unsigned long long ba[DDIR_RWDIR_CNT];
@@ -165,6 +183,7 @@ struct thread_options {
 	fio_fp64_t zipf_theta;
 	fio_fp64_t pareto_h;
 	fio_fp64_t gauss_dev;
+	fio_fp64_t random_center;
 
 	unsigned int random_generator;
 
@@ -172,9 +191,6 @@ struct thread_options {
 
 	unsigned int hugepage_size;
 	unsigned long long rw_min_bs;
-	unsigned int thinktime;
-	unsigned int thinktime_spin;
-	unsigned int thinktime_blocks;
 	unsigned int fsync_blocks;
 	unsigned int fdatasync_blocks;
 	unsigned int barrier_blocks;
@@ -193,16 +209,18 @@ struct thread_options {
 	unsigned int loops;
 	unsigned long long zone_range;
 	unsigned long long zone_size;
+	unsigned long long zone_capacity;
 	unsigned long long zone_skip;
+	uint32_t zone_skip_nz;
 	enum fio_zone_mode zone_mode;
 	unsigned long long lockmem;
 	enum fio_memtype mem_type;
 	unsigned int mem_align;
 
-	unsigned long long max_latency;
+	unsigned long long max_latency[DDIR_RWDIR_CNT];
 
-	unsigned short exit_what;
-	unsigned short stonewall;
+	unsigned int exit_what;
+	unsigned int stonewall;
 	unsigned int new_group;
 	unsigned int numjobs;
 	os_cpu_mask_t cpumask;
@@ -235,6 +253,8 @@ struct thread_options {
 	unsigned int compress_percentage;
 	unsigned int compress_chunk;
 	unsigned int dedupe_percentage;
+	unsigned int dedupe_mode;
+	unsigned int dedupe_working_set_percentage;
 	unsigned int time_based;
 	unsigned int disable_lat;
 	unsigned int disable_clat;
@@ -279,6 +299,12 @@ struct thread_options {
 	char *exec_prerun;
 	char *exec_postrun;
 
+	unsigned int thinktime;
+	unsigned int thinktime_spin;
+	unsigned int thinktime_blocks;
+	unsigned int thinktime_blocks_type;
+	unsigned int thinktime_iotime;
+
 	uint64_t rate[DDIR_RWDIR_CNT];
 	uint64_t ratemin[DDIR_RWDIR_CNT];
 	unsigned int ratecycle;
@@ -310,12 +336,8 @@ struct thread_options {
 	unsigned int uid;
 	unsigned int gid;
 
-	int flow_id;
-	int flow;
-	int flow_watermark;
-	unsigned int flow_sleep;
-
 	unsigned int offset_increment_percent;
+	unsigned int offset_increment_nz;
 	unsigned long long offset_increment;
 	unsigned long long number_ios;
 
@@ -324,6 +346,14 @@ struct thread_options {
 	unsigned long long latency_target;
 	unsigned long long latency_window;
 	fio_fp64_t latency_percentile;
+	uint32_t latency_run;
+
+	/*
+	 * flow support
+	 */
+	int flow_id;
+	unsigned int flow;
+	unsigned int flow_sleep;
 
 	unsigned int sig_figs;
 
@@ -342,8 +372,13 @@ struct thread_options {
 	/* Parameters that affect zonemode=zbd */
 	unsigned int read_beyond_wp;
 	int max_open_zones;
+	unsigned int job_max_open_zones;
+	unsigned int ignore_zone_limits;
 	fio_fp64_t zrt;
 	fio_fp64_t zrf;
+
+	unsigned int log_entries;
+	unsigned int log_prio;
 };
 
 #define FIO_TOP_STR_MAX		256
@@ -376,13 +411,19 @@ struct thread_options_pack {
 	uint64_t size;
 	uint64_t io_size;
 	uint32_t size_percent;
+	uint32_t size_nz;
+	uint32_t io_size_percent;
+	uint32_t io_size_nz;
 	uint32_t fill_device;
 	uint32_t file_append;
 	uint32_t unique_filename;
+	uint32_t pad3;
 	uint64_t file_size_low;
 	uint64_t file_size_high;
 	uint64_t start_offset;
 	uint64_t start_offset_align;
+	uint32_t start_offset_nz;
+	uint32_t pad4;
 
 	uint64_t bs[DDIR_RWDIR_CNT];
 	uint64_t ba[DDIR_RWDIR_CNT];
@@ -458,6 +499,7 @@ struct thread_options_pack {
 	fio_fp64_t zipf_theta;
 	fio_fp64_t pareto_h;
 	fio_fp64_t gauss_dev;
+	fio_fp64_t random_center;
 
 	uint32_t random_generator;
 
@@ -465,9 +507,6 @@ struct thread_options_pack {
 
 	uint32_t hugepage_size;
 	uint64_t rw_min_bs;
-	uint32_t thinktime;
-	uint32_t thinktime_spin;
-	uint32_t thinktime_blocks;
 	uint32_t fsync_blocks;
 	uint32_t fdatasync_blocks;
 	uint32_t barrier_blocks;
@@ -485,15 +524,18 @@ struct thread_options_pack {
 	uint32_t loops;
 	uint64_t zone_range;
 	uint64_t zone_size;
+	uint64_t zone_capacity;
 	uint64_t zone_skip;
 	uint64_t lockmem;
+	uint32_t zone_skip_nz;
 	uint32_t mem_type;
 	uint32_t mem_align;
 
-	uint16_t exit_what;
-	uint16_t stonewall;
+	uint32_t exit_what;
+	uint32_t stonewall;
 	uint32_t new_group;
 	uint32_t numjobs;
+
 	/*
 	 * We currently can't convert these, so don't enable them
 	 */
@@ -524,6 +566,8 @@ struct thread_options_pack {
 	uint32_t compress_percentage;
 	uint32_t compress_chunk;
 	uint32_t dedupe_percentage;
+	uint32_t dedupe_mode;
+	uint32_t dedupe_working_set_percentage;
 	uint32_t time_based;
 	uint32_t disable_lat;
 	uint32_t disable_clat;
@@ -542,7 +586,6 @@ struct thread_options_pack {
 	uint32_t lat_percentiles;
 	uint32_t slat_percentiles;
 	uint32_t percentile_precision;
-	uint32_t pad3;
 	fio_fp64_t percentile_list[FIO_IO_U_LIST_MAX_LEN];
 
 	uint8_t read_iolog_file[FIO_TOP_STR_MAX];
@@ -567,6 +610,12 @@ struct thread_options_pack {
 	 */
 	uint8_t exec_prerun[FIO_TOP_STR_MAX];
 	uint8_t exec_postrun[FIO_TOP_STR_MAX];
+
+	uint32_t thinktime;
+	uint32_t thinktime_spin;
+	uint32_t thinktime_blocks;
+	uint32_t thinktime_blocks_type;
+	uint32_t thinktime_iotime;
 
 	uint64_t rate[DDIR_RWDIR_CNT];
 	uint64_t ratemin[DDIR_RWDIR_CNT];
@@ -599,19 +648,23 @@ struct thread_options_pack {
 	uint32_t uid;
 	uint32_t gid;
 
-	int32_t flow_id;
-	int32_t flow;
-	int32_t flow_watermark;
-	uint32_t flow_sleep;
-
 	uint32_t offset_increment_percent;
+	uint32_t offset_increment_nz;
 	uint64_t offset_increment;
 	uint64_t number_ios;
 
 	uint64_t latency_target;
 	uint64_t latency_window;
-	uint64_t max_latency;
+	uint64_t max_latency[DDIR_RWDIR_CNT];
 	fio_fp64_t latency_percentile;
+	uint32_t latency_run;
+
+	/*
+	 * flow support
+	 */
+	int32_t flow_id;
+	uint32_t flow;
+	uint32_t flow_sleep;
 
 	uint32_t sig_figs;
 
@@ -628,11 +681,25 @@ struct thread_options_pack {
 	uint32_t allow_mounted_write;
 
 	uint32_t zone_mode;
+	int32_t max_open_zones;
+	uint32_t ignore_zone_limits;
+
+	uint32_t log_entries;
+	uint32_t log_prio;
 } __attribute__((packed));
 
 extern void convert_thread_options_to_cpu(struct thread_options *o, struct thread_options_pack *top);
 extern void convert_thread_options_to_net(struct thread_options_pack *top, struct thread_options *);
 extern int fio_test_cconv(struct thread_options *);
 extern void options_default_fill(struct thread_options *o);
+
+typedef int (split_parse_fn)(struct thread_options *, void *,
+			     enum fio_ddir, char *, bool);
+
+extern int str_split_parse(struct thread_data *td, char *str,
+			   split_parse_fn *fn, void *eo, bool data);
+
+extern int split_parse_ddir(struct thread_options *o, struct split *split,
+			    char *str, bool absolute, unsigned int max_splits);
 
 #endif

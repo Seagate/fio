@@ -59,7 +59,7 @@ static void __init_rand32(struct taus88_state *state, unsigned int seed)
 		__rand32(state);
 }
 
-static void __init_rand64(struct taus258_state *state, uint64_t seed)
+void __init_rand64(struct taus258_state *state, uint64_t seed)
 {
 	int cranks = 6;
 
@@ -85,12 +85,12 @@ void init_rand(struct frand_state *state, bool use64)
 		__init_rand64(&state->state64, 1);
 }
 
-void init_rand_seed(struct frand_state *state, unsigned int seed, bool use64)
+void init_rand_seed(struct frand_state *state, uint64_t seed, bool use64)
 {
 	state->use64 = use64;
 
 	if (!use64)
-		__init_rand32(&state->state32, seed);
+		__init_rand32(&state->state32, (unsigned int) seed);
 	else
 		__init_rand64(&state->state64, seed);
 }
@@ -125,10 +125,7 @@ void __fill_random_buf(void *buf, unsigned int len, uint64_t seed)
 uint64_t fill_random_buf(struct frand_state *fs, void *buf,
 			 unsigned int len)
 {
-	uint64_t r = __rand(fs);
-
-	if (sizeof(int) != sizeof(long *))
-		r *= (unsigned long) __rand(fs);
+	uint64_t r = __get_next_seed(fs);
 
 	__fill_random_buf(buf, len, r);
 	return r;
@@ -188,10 +185,7 @@ uint64_t fill_random_buf_percentage(struct frand_state *fs, void *buf,
 				    unsigned int segment, unsigned int len,
 				    char *pattern, unsigned int pbytes)
 {
-	uint64_t r = __rand(fs);
-
-	if (sizeof(int) != sizeof(long *))
-		r *= (unsigned long) __rand(fs);
+	uint64_t r = __get_next_seed(fs);
 
 	__fill_random_buf_percentage(r, buf, percentage, segment, len,
 					pattern, pbytes);

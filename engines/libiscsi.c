@@ -109,7 +109,7 @@ static int fio_iscsi_setup_lun(struct iscsi_info *iscsi_info,
 	if (iscsi_full_connect_sync(iscsi_lun->iscsi,
 				    iscsi_lun->url->portal,
 				    iscsi_lun->url->lun)) {
-		log_err("sicsi: failed to connect to LUN : %s\n",
+		log_err("iscsi: failed to connect to LUN : %s\n",
 			iscsi_get_error(iscsi_lun->iscsi));
 		ret = EINVAL;
 		goto out;
@@ -383,7 +383,7 @@ static struct io_u *fio_iscsi_event(struct thread_data *td, int event)
 	return io_u;
 }
 
-static struct ioengine_ops ioengine_iscsi = {
+FIO_STATIC struct ioengine_ops ioengine = {
 	.name               = "libiscsi",
 	.version            = FIO_IOOPS_VERSION,
 	.flags              = FIO_SYNCIO | FIO_DISKLESSIO | FIO_NODISKUTIL,
@@ -402,10 +402,10 @@ static struct ioengine_ops ioengine_iscsi = {
 
 static void fio_init fio_iscsi_register(void)
 {
-	register_ioengine(&ioengine_iscsi);
+	register_ioengine(&ioengine);
 }
 
 static void fio_exit fio_iscsi_unregister(void)
 {
-	unregister_ioengine(&ioengine_iscsi);
+	unregister_ioengine(&ioengine);
 }

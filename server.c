@@ -409,8 +409,9 @@ struct fio_net_cmd *fio_net_recv_cmd(int sk, bool wait)
 			if (cmdret->opcode == FIO_NET_CMD_TEXT) {
 				struct cmd_text_pdu *__pdu = (struct cmd_text_pdu *) cmdret->payload;
 				char *buf = (char *) __pdu->buf;
+				int len = le32_to_cpu(__pdu->buf_len);
 
-				buf[__pdu->buf_len] = '\0';
+				buf[len] = '\0';
 			} else if (cmdret->opcode == FIO_NET_CMD_JOB) {
 				struct cmd_job_pdu *__pdu = (struct cmd_job_pdu *) cmdret->payload;
 				char *buf = (char *) __pdu->buf;
@@ -950,7 +951,7 @@ static int handle_update_job_cmd(struct fio_net_cmd *cmd)
 		return 0;
 	}
 
-	td = &threads[tnumber - 1];
+	td = tnumber_to_td(tnumber);
 	convert_thread_options_to_cpu(&td->o, &pdu->top);
 	send_update_job_reply(cmd->tag, 0);
 	return 0;
@@ -1577,7 +1578,6 @@ void fio_server_send_ts(struct thread_stat *ts, struct group_run_stats *rs)
 	p.ts.cachehit		= cpu_to_le64(ts->cachehit);
 	p.ts.cachemiss		= cpu_to_le64(ts->cachemiss);
 
-
 	for (i = 0; i < DDIR_RWDIR_CNT; i++) {
 		for (j = 0; j < FIO_IO_U_PLAT_NR; j++) {
 			p.ts.io_u_plat_high_prio[i][j] = cpu_to_le64(ts->io_u_plat_high_prio[i][j]);
@@ -1911,7 +1911,7 @@ static int fio_append_iolog_gz(struct sk_entry *first, struct io_log *log)
 			break;
 		}
 		flist_add_tail(&entry->list, &first->next);
-	} while (ret != Z_STREAM_END);
+	}
 
 	ret = deflateEnd(&stream);
 	if (ret == Z_OK)
@@ -2458,6 +2458,11 @@ static void set_sig_handlers(void)
 	};
 
 	sigaction(SIGINT, &act, NULL);
+
+	/* Windows uses SIGBREAK as a quit signal from other applications */
+#ifdef WIN32
+	sigaction(SIGBREAK, &act, NULL);
+#endif
 }
 
 void fio_server_destroy_sk_key(void)
@@ -2566,6 +2571,7 @@ static int write_pid(pid_t pid, const char *pidfile)
  */
 int fio_start_server(char *pidfile)
 {
+	FILE *file;
 	pid_t pid;
 	int ret;
 
@@ -2598,13 +2604,27 @@ int fio_start_server(char *pidfile)
 	setsid();
 	openlog("fio", LOG_NDELAY|LOG_NOWAIT|LOG_PID, LOG_USER);
 	log_syslog = true;
-	close(STDIN_FILENO);
-	close(STDOUT_FILENO);
-	close(STDERR_FILENO);
+
+	file = freopen("/dev/null", "r", stdin);
+	if (!file)
+		perror("freopen");
+
+	file = freopen("/dev/null", "w", stdout);
+	if (!file)
+		perror("freopen");
+
+	file = freopen("/dev/null", "w", stderr);
+	if (!file)
+		perror("freopen");
+
 	f_out = NULL;
 	f_err = NULL;
 
 	ret = fio_server();
+
+	fclose(stdin);
+	fclose(stdout);
+	fclose(stderr);
 
 	closelog();
 	unlink(pidfile);

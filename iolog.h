@@ -42,7 +42,7 @@ struct io_sample {
 	uint64_t time;
 	union io_sample_data data;
 	uint32_t __ddir;
-	uint8_t priority_bit;
+	uint16_t priority;
 	uint64_t bs;
 };
 
@@ -105,6 +105,11 @@ struct io_log {
 	unsigned int log_offset;
 
 	/*
+	 * Log I/O priorities
+	 */
+	unsigned int log_prio;
+
+	/*
 	 * Max size of log entries before a chunk is compressed
 	 */
 	unsigned int log_gz;
@@ -144,8 +149,14 @@ struct io_log {
 /*
  * If the upper bit is set, then we have the offset as well
  */
-#define LOG_OFFSET_SAMPLE_BIT	0x40000000U
-#define io_sample_ddir(io)	((io)->__ddir & ~LOG_OFFSET_SAMPLE_BIT)
+#define LOG_OFFSET_SAMPLE_BIT	0x80000000U
+/*
+ * If the bit following the upper bit is set, then we have the priority
+ */
+#define LOG_PRIO_SAMPLE_BIT	0x40000000U
+
+#define LOG_SAMPLE_BITS		(LOG_OFFSET_SAMPLE_BIT | LOG_PRIO_SAMPLE_BIT)
+#define io_sample_ddir(io)	((io)->__ddir & ~LOG_SAMPLE_BITS)
 
 static inline void io_sample_set_ddir(struct io_log *log,
 				      struct io_sample *io,
@@ -182,6 +193,7 @@ static inline struct io_sample *__get_sample(void *samples, int log_offset,
 struct io_logs *iolog_cur_log(struct io_log *);
 uint64_t iolog_nr_samples(struct io_log *);
 void regrow_logs(struct thread_data *);
+void regrow_agg_logs(void);
 
 static inline struct io_sample *get_sample(struct io_log *iolog,
 					   struct io_logs *cur_log,
@@ -261,6 +273,7 @@ struct log_params {
 	int hist_coarseness;
 	int log_type;
 	int log_offset;
+	int log_prio;
 	int log_gz;
 	int log_gz_store;
 	int log_compress;

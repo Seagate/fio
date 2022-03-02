@@ -331,7 +331,7 @@ static void calc_rate(int unified_rw_rep, unsigned long mtime,
 		else
 			this_rate = 0;
 
-		if (unified_rw_rep) {
+		if (unified_rw_rep == UNIFIED_MIXED) {
 			rate[i] = 0;
 			rate[0] += this_rate;
 		} else
@@ -356,7 +356,7 @@ static void calc_iops(int unified_rw_rep, unsigned long mtime,
 		else
 			this_iops = 0;
 
-		if (unified_rw_rep) {
+		if (unified_rw_rep == UNIFIED_MIXED) {
 			iops[i] = 0;
 			iops[0] += this_iops;
 		} else
@@ -383,8 +383,8 @@ bool calc_thread_status(struct jobs_eta *je, int force)
 	struct thread_data *td;
 	int i, unified_rw_rep;
 	uint64_t rate_time, disp_time, bw_avg_time, *eta_secs;
-	unsigned long long io_bytes[DDIR_RWDIR_CNT];
-	unsigned long long io_iops[DDIR_RWDIR_CNT];
+	unsigned long long io_bytes[DDIR_RWDIR_CNT] = {};
+	unsigned long long io_iops[DDIR_RWDIR_CNT] = {};
 	struct timespec now;
 
 	static unsigned long long rate_io_bytes[DDIR_RWDIR_CNT];
@@ -413,8 +413,6 @@ bool calc_thread_status(struct jobs_eta *je, int force)
 
 	je->elapsed_sec = (mtime_since_genesis() + 999) / 1000;
 
-	io_bytes[DDIR_READ] = io_bytes[DDIR_WRITE] = io_bytes[DDIR_TRIM] = 0;
-	io_iops[DDIR_READ] = io_iops[DDIR_WRITE] = io_iops[DDIR_TRIM] = 0;
 	bw_avg_time = ULONG_MAX;
 	unified_rw_rep = 0;
 	for_each_td(td, i) {
@@ -509,9 +507,10 @@ bool calc_thread_status(struct jobs_eta *je, int force)
 		calc_rate(unified_rw_rep, rate_time, io_bytes, rate_io_bytes,
 				je->rate);
 		memcpy(&rate_prev_time, &now, sizeof(now));
-		add_agg_sample(sample_val(je->rate[DDIR_READ]), DDIR_READ, 0, 0);
-		add_agg_sample(sample_val(je->rate[DDIR_WRITE]), DDIR_WRITE, 0, 0);
-		add_agg_sample(sample_val(je->rate[DDIR_TRIM]), DDIR_TRIM, 0, 0);
+		regrow_agg_logs();
+		for_each_rw_ddir(ddir) {
+			add_agg_sample(sample_val(je->rate[ddir]), ddir, 0);
+		}
 	}
 
 	disp_time = mtime_since(&disp_prev_time, &now);
@@ -536,56 +535,38 @@ bool calc_thread_status(struct jobs_eta *je, int force)
 static int gen_eta_str(struct jobs_eta *je, char *p, size_t left,
 		       char **rate_str, char **iops_str)
 {
-	bool has_r = je->rate[DDIR_READ] || je->iops[DDIR_READ];
-	bool has_w = je->rate[DDIR_WRITE] || je->iops[DDIR_WRITE];
-	bool has_t = je->rate[DDIR_TRIM] || je->iops[DDIR_TRIM];
+	static const char c[DDIR_RWDIR_CNT] = {'r', 'w', 't'};
+	bool has[DDIR_RWDIR_CNT];
+	bool has_any = false;
+	const char *sep;
 	int l = 0;
 
-	if (!has_r && !has_w && !has_t)
+	for_each_rw_ddir(ddir) {
+		has[ddir] = (je->rate[ddir] || je->iops[ddir]);
+		has_any |= has[ddir];
+	}
+	if (!has_any)
 		return 0;
 
-	if (has_r) {
-		l += snprintf(p + l, left - l, "[r=%s", rate_str[DDIR_READ]);
-		if (!has_w)
-			l += snprintf(p + l, left - l, "]");
+	l += snprintf(p + l, left - l, "[");
+	sep = "";
+	for_each_rw_ddir(ddir) {
+		if (has[ddir]) {
+			l += snprintf(p + l, left - l, "%s%c=%s",
+					sep, c[ddir], rate_str[ddir]);
+			sep = ",";
+		}
 	}
-	if (has_w) {
-		if (has_r)
-			l += snprintf(p + l, left - l, ",");
-		else
-			l += snprintf(p + l, left - l, "[");
-		l += snprintf(p + l, left - l, "w=%s", rate_str[DDIR_WRITE]);
-		if (!has_t)
-			l += snprintf(p + l, left - l, "]");
+	l += snprintf(p + l, left - l, "][");
+	sep = "";
+	for_each_rw_ddir(ddir) {
+		if (has[ddir]) {
+			l += snprintf(p + l, left - l, "%s%c=%s",
+					sep, c[ddir], iops_str[ddir]);
+			sep = ",";
+		}
 	}
-	if (has_t) {
-		if (has_r || has_w)
-			l += snprintf(p + l, left - l, ",");
-		else if (!has_r && !has_w)
-			l += snprintf(p + l, left - l, "[");
-		l += snprintf(p + l, left - l, "t=%s]", rate_str[DDIR_TRIM]);
-	}
-	if (has_r) {
-		l += snprintf(p + l, left - l, "[r=%s", iops_str[DDIR_READ]);
-		if (!has_w)
-			l += snprintf(p + l, left - l, " IOPS]");
-	}
-	if (has_w) {
-		if (has_r)
-			l += snprintf(p + l, left - l, ",");
-		else
-			l += snprintf(p + l, left - l, "[");
-		l += snprintf(p + l, left - l, "w=%s", iops_str[DDIR_WRITE]);
-		if (!has_t)
-			l += snprintf(p + l, left - l, " IOPS]");
-	}
-	if (has_t) {
-		if (has_r || has_w)
-			l += snprintf(p + l, left - l, ",");
-		else if (!has_r && !has_w)
-			l += snprintf(p + l, left - l, "[");
-		l += snprintf(p + l, left - l, "t=%s IOPS]", iops_str[DDIR_TRIM]);
-	}
+	l += snprintf(p + l, left - l, " IOPS]");
 
 	return l;
 }

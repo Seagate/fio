@@ -146,6 +146,9 @@ enum block_info_state {
 #define FIO_JOBNAME_SIZE	128
 #define FIO_JOBDESC_SIZE	256
 #define FIO_VERROR_SIZE		128
+#define UNIFIED_SPLIT		0
+#define UNIFIED_MIXED		1
+#define UNIFIED_BOTH		2
 
 enum fio_lat {
 	FIO_SLAT = 0,
@@ -318,11 +321,12 @@ extern void show_group_stats(struct group_run_stats *rs, struct buf_output *);
 extern bool calc_thread_status(struct jobs_eta *je, int force);
 extern void display_thread_status(struct jobs_eta *je);
 extern void __show_run_stats(void);
-extern void __show_running_run_stats(void);
+extern int __show_running_run_stats(void);
 extern void show_running_run_stats(void);
 extern void check_for_running_stats(void);
 extern void sum_thread_stats(struct thread_stat *dst, struct thread_stat *src, bool first);
 extern void sum_group_stats(struct group_run_stats *dst, struct group_run_stats *src);
+extern void init_thread_stat_min_vals(struct thread_stat *ts);
 extern void init_thread_stat(struct thread_stat *ts);
 extern void init_group_run_stat(struct group_run_stats *gs);
 extern void eta_to_str(char *str, unsigned long eta_sec);
@@ -337,13 +341,12 @@ extern void update_rusage_stat(struct thread_data *);
 extern void clear_rusage_stat(struct thread_data *);
 
 extern void add_lat_sample(struct thread_data *, enum fio_ddir, unsigned long long,
-				unsigned long long, uint64_t, uint8_t);
+			   unsigned long long, uint64_t, unsigned int, bool);
 extern void add_clat_sample(struct thread_data *, enum fio_ddir, unsigned long long,
-				unsigned long long, uint64_t, uint8_t);
+			    unsigned long long, uint64_t, unsigned int, bool);
 extern void add_slat_sample(struct thread_data *, enum fio_ddir, unsigned long long,
-				unsigned long long, uint64_t, uint8_t);
-extern void add_agg_sample(union io_sample_data, enum fio_ddir, unsigned long long bs,
-				uint8_t priority_bit);
+				unsigned long long, uint64_t, unsigned int);
+extern void add_agg_sample(union io_sample_data, enum fio_ddir, unsigned long long);
 extern void add_iops_sample(struct thread_data *, struct io_u *,
 				unsigned int);
 extern void add_bw_sample(struct thread_data *, struct io_u *,

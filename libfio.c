@@ -104,7 +104,7 @@ static void reset_io_counters(struct thread_data *td, int all)
 	/*
 	 * reset file done count if we are to start over
 	 */
-	if (td->o.time_based || td->o.loops || td->o.do_verify)
+	if (td->o.time_based || td->loops > 1 || td->o.do_verify)
 		td->nr_done_files = 0;
 }
 
@@ -140,7 +140,6 @@ void reset_all_stats(struct thread_data *td)
 		td->io_issues[i] = 0;
 		td->ts.total_io_u[i] = 0;
 		td->ts.runtime[i] = 0;
-		td->rwmix_issues = 0;
 	}
 
 	set_epoch_time(td, td->o.log_unix_epoch);
@@ -156,8 +155,13 @@ void reset_all_stats(struct thread_data *td)
 
 void reset_fio_state(void)
 {
+	int i;
+
 	groupid = 0;
 	thread_number = 0;
+	cur_segment = 0;
+	for (i = 0; i < nr_segments; i++)
+		segments[i].nr_threads = 0;
 	stat_number = 0;
 	done_secs = 0;
 }

@@ -33,6 +33,7 @@ enum fio_file_flags {
 	FIO_FILE_partial_mmap	= 1 << 6,	/* can't do full mmap */
 	FIO_FILE_axmap		= 1 << 7,	/* uses axmap */
 	FIO_FILE_lfsr		= 1 << 8,	/* lfsr is used */
+	FIO_FILE_smalloc	= 1 << 9,	/* smalloc file/file_name */
 };
 
 enum file_lock_mode {
@@ -104,6 +105,9 @@ struct fio_file {
 	 * Zoned block device information. See also zonemode=zbd.
 	 */
 	struct zoned_block_device_info *zbd_info;
+	/* zonemode=zbd working area */
+	uint32_t min_zone;	/* inclusive */
+	uint32_t max_zone;	/* exclusive */
 
 	/*
 	 * Track last end and last start of IO for a given data direction
@@ -185,6 +189,7 @@ FILE_FLAG_FNS(hashed);
 FILE_FLAG_FNS(partial_mmap);
 FILE_FLAG_FNS(axmap);
 FILE_FLAG_FNS(lfsr);
+FILE_FLAG_FNS(smalloc);
 #undef FILE_FLAG_FNS
 
 /*
@@ -202,6 +207,7 @@ extern "C" {
 extern int __must_check generic_open_file(struct thread_data *, struct fio_file *);
 extern int __must_check generic_close_file(struct thread_data *, struct fio_file *);
 extern int __must_check generic_get_file_size(struct thread_data *, struct fio_file *);
+extern int __must_check generic_prepopulate_file(struct thread_data *, struct fio_file *);
 #ifdef __cplusplus
 }
 #endif
@@ -226,5 +232,6 @@ extern void fio_file_reset(struct thread_data *, struct fio_file *);
 extern bool fio_files_done(struct thread_data *);
 extern bool exists_and_not_regfile(const char *);
 extern int fio_set_directio(struct thread_data *, struct fio_file *);
+extern void fio_file_free(struct fio_file *);
 
 #endif

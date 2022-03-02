@@ -200,6 +200,14 @@ static int _fio_rbd_connect(struct thread_data *td)
 		log_err("rados_create failed.\n");
 		goto failed_early;
 	}
+	if (o->pool_name == NULL) {
+		log_err("rbd pool name must be provided.\n");
+		goto failed_early;
+	}
+	if (!o->rbd_name) {
+		log_err("rbdname must be provided.\n");
+		goto failed_early;
+	}
 
 	r = rados_conf_read_file(rbd->cluster, NULL);
 	if (r < 0) {
@@ -219,10 +227,28 @@ static int _fio_rbd_connect(struct thread_data *td)
 		goto failed_shutdown;
 	}
 
+        if (td->o.odirect) {
+		r = rados_conf_set(rbd->cluster, "rbd_cache", "false");
+		if (r < 0) {
+			log_info("failed to disable RBD in-memory cache\n");
+		}
+	}
+
 	r = rbd_open(rbd->io_ctx, o->rbd_name, &rbd->image, NULL /*snap */ );
 	if (r < 0) {
 		log_err("rbd_open failed.\n");
 		goto failed_open;
+	}
+
+	if (!td->o.odirect) {
+		/*
+		 * ensure cache enables writeback/around mode unless explicitly
+		 * configured for writethrough mode
+		 */
+		r = rbd_flush(rbd->image);
+		if (r < 0) {
+			log_info("rbd: failed to issue initial flush\n");
+		}
 	}
 
 	if (!_fio_rbd_setup_poll(rbd))
@@ -660,7 +686,7 @@ static int fio_rbd_io_u_init(struct thread_data *td, struct io_u *io_u)
 	return 0;
 }
 
-static struct ioengine_ops ioengine = {
+FIO_STATIC struct ioengine_ops ioengine = {
 	.name			= "rbd",
 	.version		= FIO_IOOPS_VERSION,
 	.setup			= fio_rbd_setup,

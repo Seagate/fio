@@ -21,6 +21,7 @@
 #include "../lib/types.h"
 
 #include "windows/posix.h"
+#include "os-windows-7.h"
 
 #ifndef PTHREAD_STACK_MIN
 #define PTHREAD_STACK_MIN 65535
@@ -76,6 +77,7 @@
 #define SIGCONT	0
 #define SIGUSR1	1
 #define SIGUSR2 2
+#define SIGKILL 15 /* SIGKILL doesn't exists, let's use SIGTERM */
 
 typedef int sigset_t;
 typedef int siginfo_t;
@@ -203,7 +205,11 @@ static inline int fio_mkdir(const char *path, mode_t mode) {
 	}
 
 	if (CreateDirectoryA(path, NULL) == 0) {
-		log_err("CreateDirectoryA = %d\n", GetLastError());
+		/* Ignore errors if path is a device namespace */
+		if (strcmp(path, "\\\\.") == 0) {
+			errno = EEXIST;
+			return -1;
+		}
 		errno = win_to_posix_error(GetLastError());
 		return -1;
 	}
@@ -211,13 +217,18 @@ static inline int fio_mkdir(const char *path, mode_t mode) {
 	return 0;
 }
 
-#ifdef CONFIG_WINDOWS_XP
-#include "os-windows-xp.h"
-#else
 #define FIO_HAVE_CPU_ONLINE_SYSCONF
 unsigned int cpus_online(void);
-#include "os-windows-7.h"
-#endif
+
+int first_set_cpu(os_cpu_mask_t *cpumask);
+int fio_setaffinity(int pid, os_cpu_mask_t cpumask);
+int fio_cpuset_init(os_cpu_mask_t *mask);
+int fio_getaffinity(int pid, os_cpu_mask_t *mask);
+void fio_cpu_clear(os_cpu_mask_t *mask, int cpu);
+void fio_cpu_set(os_cpu_mask_t *mask, int cpu);
+int fio_cpu_isset(os_cpu_mask_t *mask, int cpu);
+int fio_cpu_count(os_cpu_mask_t *mask);
+int fio_cpuset_exit(os_cpu_mask_t *mask);
 
 int first_set_cpu(os_cpu_mask_t *cpumask);
 int fio_setaffinity(int pid, os_cpu_mask_t cpumask);

@@ -109,6 +109,7 @@ class FioLatTest():
         """Run a test."""
 
         fio_args = [
+            "--max-jobs=16",
             "--name=latency",
             "--randrepeat=0",
             "--norandommap",
@@ -215,7 +216,7 @@ class FioLatTest():
             file_data = file.read()
 
         #
-        # Read the first few lines and see if any of them begin with '3;fio-'
+        # Read the first few lines and see if any of them begin with '3;'
         # If so, the line is probably terse output. Obviously, this only
         # works for fio terse version 3 and it does not work for
         # multi-line terse output
@@ -223,7 +224,7 @@ class FioLatTest():
         lines = file_data.splitlines()
         for i in range(8):
             file_data = lines[i]
-            if file_data.startswith('3;fio-'):
+            if file_data.startswith('3;'):
                 self.terse_data = file_data.split(';')
                 return True
 
@@ -395,6 +396,11 @@ class FioLatTest():
         approximation   value of the bin used by fio to store a given latency
         actual          actual latency value
         """
+
+        # Avoid a division by zero. The smallest latency values have no error.
+        if actual == 0:
+            return approximation == 0
+
         delta = abs(approximation - actual) / actual
         return delta <= 1/128
 
@@ -1298,9 +1304,9 @@ def main():
            (args.run_only and test['test_id'] not in args.run_only):
             skipped = skipped + 1
             outcome = 'SKIPPED (User request)'
-        elif platform.system() != 'Linux' and 'cmdprio_percentage' in test:
+        elif (platform.system() != 'Linux' or os.geteuid() != 0) and 'cmdprio_percentage' in test:
             skipped = skipped + 1
-            outcome = 'SKIPPED (Linux required for cmdprio_percentage tests)'
+            outcome = 'SKIPPED (Linux root required for cmdprio_percentage tests)'
         else:
             test_obj = test['test_obj'](artifact_root, test, args.debug)
             status = test_obj.run_fio(fio)

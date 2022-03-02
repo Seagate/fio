@@ -6,8 +6,15 @@
 #include "compiler/compiler.h"
 #include "flist.h"
 #include "io_u.h"
+#include "zbd_types.h"
 
-#define FIO_IOOPS_VERSION	25
+#define FIO_IOOPS_VERSION	30
+
+#ifndef CONFIG_DYNAMIC_ENGINES
+#define FIO_STATIC	static
+#else
+#define FIO_STATIC
+#endif
 
 /*
  * io_ops->queue() return values
@@ -23,6 +30,7 @@ struct ioengine_ops {
 	const char *name;
 	int version;
 	int flags;
+	void *dlhandle;
 	int (*setup)(struct thread_data *);
 	int (*init)(struct thread_data *);
 	int (*post_init)(struct thread_data *);
@@ -40,11 +48,20 @@ struct ioengine_ops {
 	int (*invalidate)(struct thread_data *, struct fio_file *);
 	int (*unlink_file)(struct thread_data *, struct fio_file *);
 	int (*get_file_size)(struct thread_data *, struct fio_file *);
+	int (*prepopulate_file)(struct thread_data *, struct fio_file *);
 	void (*terminate)(struct thread_data *);
 	int (*iomem_alloc)(struct thread_data *, size_t);
 	void (*iomem_free)(struct thread_data *);
 	int (*io_u_init)(struct thread_data *, struct io_u *);
 	void (*io_u_free)(struct thread_data *, struct io_u *);
+	int (*get_zoned_model)(struct thread_data *td,
+			       struct fio_file *f, enum zbd_zoned_model *);
+	int (*report_zones)(struct thread_data *, struct fio_file *,
+			    uint64_t, struct zbd_zone *, unsigned int);
+	int (*reset_wp)(struct thread_data *, struct fio_file *,
+			uint64_t, uint64_t);
+	int (*get_max_open_zones)(struct thread_data *, struct fio_file *,
+				  unsigned int *);
 	int option_struct_size;
 	struct fio_option *options;
 };
@@ -65,7 +82,8 @@ enum fio_ioengine_flags {
 	FIO_NOSTATS	= 1 << 12,	/* don't do IO stats */
 	FIO_NOFILEHASH	= 1 << 13,	/* doesn't hash the files for lookup later. */
 	FIO_ASYNCIO_SYNC_TRIM
-			= 1 << 14	/* io engine has async ->queue except for trim */
+			= 1 << 14,	/* io engine has async ->queue except for trim */
+	FIO_NO_OFFLOAD	= 1 << 15,	/* no async offload */
 };
 
 /*

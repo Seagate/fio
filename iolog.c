@@ -19,6 +19,7 @@
 #include "smalloc.h"
 #include "blktrace.h"
 #include "pshared.h"
+#include "lib/roundup.h"
 
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -150,7 +151,8 @@ int read_iolog_get(struct thread_data *td, struct io_u *io_u)
 
 	while (!flist_empty(&td->io_log_list)) {
 		int ret;
-		if (td->o.read_iolog_chunked) {
+
+		if (!td->io_log_blktrace && td->o.read_iolog_chunked) {
 			if (td->io_log_checkmark == td->io_log_current) {
 				if (!read_iolog2(td))
 					return 1;
@@ -173,6 +175,7 @@ int read_iolog_get(struct thread_data *td, struct io_u *io_u)
 		io_u->ddir = ipo->ddir;
 		if (ipo->ddir != DDIR_WAIT) {
 			io_u->offset = ipo->offset;
+			io_u->verify_offset = ipo->offset;
 			io_u->buflen = ipo->len;
 			io_u->file = td->files[ipo->fileno];
 			get_file(io_u->file);
@@ -342,6 +345,9 @@ void trim_io_piece(const struct io_u *io_u)
 
 void write_iolog_close(struct thread_data *td)
 {
+	if (!td->iolog_f)
+		return;
+
 	fflush(td->iolog_f);
 	fclose(td->iolog_f);
 	free(td->iolog_buf);
@@ -602,12 +608,11 @@ static int open_socket(const char *path)
 /*
  * open iolog, check version, and call appropriate parser
  */
-static bool init_iolog_read(struct thread_data *td)
+static bool init_iolog_read(struct thread_data *td, char *fname)
 {
-	char buffer[256], *p, *fname;
+	char buffer[256], *p;
 	FILE *f = NULL;
 
-	fname = get_name_by_idx(td->o.read_iolog_file, td->subjob_number);
 	dprint(FD_IO, "iolog: name=%s\n", fname);
 
 	if (is_socket(fname)) {
@@ -616,6 +621,8 @@ static bool init_iolog_read(struct thread_data *td)
 		fd = open_socket(fname);
 		if (fd >= 0)
 			f = fdopen(fd, "r");
+	} else if (!strcmp(fname, "-")) {
+		f = stdin;
 	} else
 		f = fopen(fname, "r");
 
@@ -694,15 +701,19 @@ bool init_iolog(struct thread_data *td)
 
 	if (td->o.read_iolog_file) {
 		int need_swap;
+		char * fname = get_name_by_idx(td->o.read_iolog_file, td->subjob_number);
 
 		/*
 		 * Check if it's a blktrace file and load that if possible.
 		 * Otherwise assume it's a normal log file and load that.
 		 */
-		if (is_blktrace(td->o.read_iolog_file, &need_swap))
-			ret = load_blktrace(td, td->o.read_iolog_file, need_swap);
-		else
-			ret = init_iolog_read(td);
+		if (is_blktrace(fname, &need_swap)) {
+			td->io_log_blktrace = 1;
+			ret = load_blktrace(td, fname, need_swap);
+		} else {
+			td->io_log_blktrace = 0;
+			ret = init_iolog_read(td, fname);
+		}
 	} else if (td->o.write_iolog_file)
 		ret = init_iolog_write(td);
 	else
@@ -726,6 +737,7 @@ void setup_log(struct io_log **log, struct log_params *p,
 	INIT_FLIST_HEAD(&l->io_logs);
 	l->log_type = p->log_type;
 	l->log_offset = p->log_offset;
+	l->log_prio = p->log_prio;
 	l->log_gz = p->log_gz;
 	l->log_gz_store = p->log_gz_store;
 	l->avg_msec = p->avg_msec;
@@ -745,16 +757,21 @@ void setup_log(struct io_log **log, struct log_params *p,
 	}
 
 	if (l->td && l->td->o.io_submit_mode != IO_MODE_OFFLOAD) {
+		unsigned int def_samples = DEF_LOG_ENTRIES;
 		struct io_logs *__p;
 
 		__p = calloc(1, sizeof(*l->pending));
-		__p->max_samples = DEF_LOG_ENTRIES;
+		if (l->td->o.iodepth > DEF_LOG_ENTRIES)
+			def_samples = roundup_pow2(l->td->o.iodepth);
+		__p->max_samples = def_samples;
 		__p->log = calloc(__p->max_samples, log_entry_sz(l));
 		l->pending = __p;
 	}
 
 	if (l->log_offset)
 		l->log_ddir_mask = LOG_OFFSET_SAMPLE_BIT;
+	if (l->log_prio)
+		l->log_ddir_mask |= LOG_PRIO_SAMPLE_BIT;
 
 	INIT_FLIST_HEAD(&l->chunk_list);
 
@@ -881,33 +898,55 @@ static void flush_hist_samples(FILE *f, int hist_coarseness, void *samples,
 void flush_samples(FILE *f, void *samples, uint64_t sample_size)
 {
 	struct io_sample *s;
-	int log_offset;
+	int log_offset, log_prio;
 	uint64_t i, nr_samples;
+	unsigned int prio_val;
+	const char *fmt;
 
 	if (!sample_size)
 		return;
 
 	s = __get_sample(samples, 0, 0);
 	log_offset = (s->__ddir & LOG_OFFSET_SAMPLE_BIT) != 0;
+	log_prio = (s->__ddir & LOG_PRIO_SAMPLE_BIT) != 0;
+
+	if (log_offset) {
+		if (log_prio)
+			fmt = "%lu, %" PRId64 ", %u, %llu, %llu, 0x%04x\n";
+		else
+			fmt = "%lu, %" PRId64 ", %u, %llu, %llu, %u\n";
+	} else {
+		if (log_prio)
+			fmt = "%lu, %" PRId64 ", %u, %llu, 0x%04x\n";
+		else
+			fmt = "%lu, %" PRId64 ", %u, %llu, %u\n";
+	}
 
 	nr_samples = sample_size / __log_entry_sz(log_offset);
 
 	for (i = 0; i < nr_samples; i++) {
 		s = __get_sample(samples, log_offset, i);
 
+		if (log_prio)
+			prio_val = s->priority;
+		else
+			prio_val = ioprio_value_is_class_rt(s->priority);
+
 		if (!log_offset) {
-			fprintf(f, "%lu, %" PRId64 ", %u, %llu, %u\n",
-					(unsigned long) s->time,
-					s->data.val,
-					io_sample_ddir(s), (unsigned long long) s->bs, s->priority_bit);
+			fprintf(f, fmt,
+				(unsigned long) s->time,
+				s->data.val,
+				io_sample_ddir(s), (unsigned long long) s->bs,
+				prio_val);
 		} else {
 			struct io_sample_offset *so = (void *) s;
 
-			fprintf(f, "%lu, %" PRId64 ", %u, %llu, %llu, %u\n",
-					(unsigned long) s->time,
-					s->data.val,
-					io_sample_ddir(s), (unsigned long long) s->bs,
-					(unsigned long long) so->offset, s->priority_bit);
+			fprintf(f, fmt,
+				(unsigned long) s->time,
+				s->data.val,
+				io_sample_ddir(s), (unsigned long long) s->bs,
+				(unsigned long long) so->offset,
+				prio_val);
 		}
 	}
 }

@@ -464,6 +464,7 @@ static int get_next_block(struct thread_data *td, struct io_u *io_u,
 			log_err("fio: bug in offset generation: offset=%llu, b=%llu\n", (unsigned long long) offset, (unsigned long long) b);
 			ret = 1;
 		}
+		io_u->verify_offset = io_u->offset;
 	}
 
 	return ret;
@@ -506,6 +507,7 @@ static int get_next_offset(struct thread_data *td, struct io_u *io_u,
 		return 1;
 	}
 
+	io_u->verify_offset = io_u->offset;
 	return 0;
 }
 
@@ -606,7 +608,7 @@ static inline enum fio_ddir get_rand_ddir(struct thread_data *td)
 
 int io_u_quiesce(struct thread_data *td)
 {
-	int ret = 0, completed = 0;
+	int ret = 0, completed = 0, err = 0;
 
 	/*
 	 * We are going to sleep, ensure that we flush anything pending as
@@ -625,7 +627,7 @@ int io_u_quiesce(struct thread_data *td)
 		if (ret > 0)
 			completed += ret;
 		else if (ret < 0)
-			break;
+			err = ret;
 	}
 
 	if (td->flags & TD_F_REGROW_LOGS)
@@ -634,7 +636,7 @@ int io_u_quiesce(struct thread_data *td)
 	if (completed)
 		return completed;
 
-	return ret;
+	return err;
 }
 
 static enum fio_ddir rate_ddir(struct thread_data *td, enum fio_ddir ddir)
@@ -680,7 +682,22 @@ static enum fio_ddir rate_ddir(struct thread_data *td, enum fio_ddir ddir)
 	if (td->o.io_submit_mode == IO_MODE_INLINE)
 		io_u_quiesce(td);
 
+	if (td->o.timeout && ((usec + now) > td->o.timeout)) {
+		/*
+		 * check if the usec is capable of taking negative values
+		 */
+		if (now > td->o.timeout) {
+			ddir = DDIR_INVAL;
+			return ddir;
+		}
+		usec = td->o.timeout - now;
+	}
 	usec_sleep(td, usec);
+
+	now = utime_since_now(&td->epoch);
+	if ((td->o.timeout && (now > td->o.timeout)) || td->terminate)
+		ddir = DDIR_INVAL;
+
 	return ddir;
 }
 
@@ -746,6 +763,9 @@ static void set_rw_ddir(struct thread_data *td, struct io_u *io_u)
 {
 	enum fio_ddir ddir = get_rw_ddir(td);
 
+	if (td->o.zone_mode == ZONE_MODE_ZBD)
+		ddir = zbd_adjust_ddir(td, io_u, ddir);
+
 	if (td_trimwrite(td)) {
 		struct fio_file *f = io_u->file;
 		if (f->last_pos[DDIR_WRITE] == f->last_pos[DDIR_TRIM])
@@ -775,7 +795,7 @@ void put_io_u(struct thread_data *td, struct io_u *io_u)
 {
 	const bool needs_lock = td_async_processing(td);
 
-	zbd_put_io_u(io_u);
+	zbd_put_io_u(td, io_u);
 
 	if (td->parent)
 		td = td->parent;
@@ -896,6 +916,10 @@ get_io_u:
 
 	set_rw_ddir(td, io_u);
 
+	if (io_u->ddir == DDIR_INVAL) {
+		dprint(FD_IO, "invalid direction received ddir = %d", io_u->ddir);
+		return 1;
+	}
 	/*
 	 * fsync() or fdatasync() or trim etc, we are done
 	 */
@@ -956,6 +980,7 @@ get_io_u:
 
 out:
 	dprint_io_u(io_u, "fill");
+	io_u->verify_offset = io_u->offset;
 	td->zone_bytes += io_u->buflen;
 	return 0;
 }
@@ -982,6 +1007,7 @@ static void __io_u_mark_map(uint64_t *map, unsigned int nr)
 		break;
 	case 1 ... 4:
 		idx = 1;
+		fallthrough;
 	case 0:
 		break;
 	}
@@ -1023,6 +1049,7 @@ void io_u_mark_depth(struct thread_data *td, unsigned int nr)
 		break;
 	case 2 ... 3:
 		idx = 1;
+		fallthrough;
 	case 1:
 		break;
 	}
@@ -1063,6 +1090,7 @@ static void io_u_mark_lat_nsec(struct thread_data *td, unsigned long long nsec)
 		break;
 	case 2 ... 3:
 		idx = 1;
+		fallthrough;
 	case 0 ... 1:
 		break;
 	}
@@ -1104,6 +1132,7 @@ static void io_u_mark_lat_usec(struct thread_data *td, unsigned long long usec)
 		break;
 	case 2 ... 3:
 		idx = 1;
+		fallthrough;
 	case 0 ... 1:
 		break;
 	}
@@ -1151,6 +1180,7 @@ static void io_u_mark_lat_msec(struct thread_data *td, unsigned long long msec)
 		break;
 	case 2 ... 3:
 		idx = 1;
+		fallthrough;
 	case 0 ... 1:
 		break;
 	}
@@ -1310,8 +1340,10 @@ static struct fio_file *__get_next_file(struct thread_data *td)
 	if (f && fio_file_open(f) && !fio_file_closing(f)) {
 		if (td->o.file_service_type == FIO_FSERVICE_SEQ)
 			goto out;
-		if (td->file_service_left--)
-			goto out;
+		if (td->file_service_left) {
+		  td->file_service_left--;
+		  goto out;
+		}
 	}
 
 	if (td->o.file_service_type == FIO_FSERVICE_RR ||
@@ -1353,7 +1385,7 @@ static long set_io_u_file(struct thread_data *td, struct io_u *io_u)
 		if (!fill_io_u(td, io_u))
 			break;
 
-		zbd_put_io_u(io_u);
+		zbd_put_io_u(td, io_u);
 
 		put_file_log(td, f);
 		td_io_close_file(td, f);
@@ -1371,11 +1403,16 @@ static long set_io_u_file(struct thread_data *td, struct io_u *io_u)
 	return 0;
 }
 
-static void lat_fatal(struct thread_data *td, struct io_completion_data *icd,
+static void lat_fatal(struct thread_data *td, struct io_u *io_u, struct io_completion_data *icd,
 		      unsigned long long tnsec, unsigned long long max_nsec)
 {
-	if (!td->error)
-		log_err("fio: latency of %llu nsec exceeds specified max (%llu nsec)\n", tnsec, max_nsec);
+	if (!td->error) {
+		log_err("fio: latency of %llu nsec exceeds specified max (%llu nsec): %s %s %llu %llu\n",
+					tnsec, max_nsec,
+					io_u->file->file_name,
+					io_ddir_name(io_u->ddir),
+					io_u->offset, io_u->buflen);
+	}
 	td_verror(td, ETIMEDOUT, "max latency exceeded");
 	icd->error = ETIMEDOUT;
 }
@@ -1402,6 +1439,7 @@ static bool __lat_target_failed(struct thread_data *td)
 		td->latency_qd_low--;
 
 	td->latency_qd = (td->latency_qd + td->latency_qd_low) / 2;
+	td->latency_stable_count = 0;
 
 	dprint(FD_RATE, "Ramped down: %d %d %d\n", td->latency_qd_low, td->latency_qd, td->latency_qd_high);
 
@@ -1451,6 +1489,21 @@ static void lat_target_success(struct thread_data *td)
 
 	td->latency_qd_low = td->latency_qd;
 
+	if (td->latency_qd + 1 == td->latency_qd_high) {
+		/*
+		 * latency_qd will not incease on lat_target_success(), so
+		 * called stable. If we stick with this queue depth, the
+		 * final latency is likely lower than latency_target. Fix
+		 * this by increasing latency_qd_high slowly. Use a naive
+		 * heuristic here. If we get lat_target_success() 3 times
+		 * in a row, increase latency_qd_high by 1.
+		 */
+		if (++td->latency_stable_count >= 3) {
+			td->latency_qd_high++;
+			td->latency_stable_count = 0;
+		}
+	}
+
 	/*
 	 * If we haven't failed yet, we double up to a failing value instead
 	 * of bisecting from highest possible queue depth. If we have set
@@ -1470,7 +1523,7 @@ static void lat_target_success(struct thread_data *td)
 	 * Same as last one, we are done. Let it run a latency cycle, so
 	 * we get only the results from the targeted depth.
 	 */
-	if (td->latency_qd == qd) {
+	if (!o->latency_run && td->latency_qd == qd) {
 		if (td->latency_end_run) {
 			dprint(FD_RATE, "We are done\n");
 			td->done = 1;
@@ -1540,9 +1593,10 @@ struct io_u *__get_io_u(struct thread_data *td)
 		__td_io_u_lock(td);
 
 again:
-	if (!io_u_rempty(&td->io_u_requeues))
+	if (!io_u_rempty(&td->io_u_requeues)) {
 		io_u = io_u_rpop(&td->io_u_requeues);
-	else if (!queue_full(td)) {
+		io_u->resid = 0;
+	} else if (!queue_full(td)) {
 		io_u = io_u_qpop(&td->io_u_freelist);
 
 		io_u->file = NULL;
@@ -1555,7 +1609,7 @@ again:
 		assert(io_u->flags & IO_U_F_FREE);
 		io_u_clear(td, io_u, IO_U_F_FREE | IO_U_F_NO_FILE_PUT |
 				 IO_U_F_TRIMMED | IO_U_F_BARRIER |
-				 IO_U_F_VER_LIST | IO_U_F_PRIORITY);
+				 IO_U_F_VER_LIST | IO_U_F_HIGH_PRIO);
 
 		io_u->error = 0;
 		io_u->acct_ddir = -1;
@@ -1759,6 +1813,10 @@ struct io_u *get_io_u(struct thread_data *td)
 	io_u->xfer_buf = io_u->buf;
 	io_u->xfer_buflen = io_u->buflen;
 
+	/*
+	 * Remember the issuing context priority. The IO engine may change this.
+	 */
+	io_u->ioprio = td->ioprio;
 out:
 	assert(io_u->file);
 	if (!td_io_prep(td, io_u)) {
@@ -1867,7 +1925,8 @@ static void account_io_completion(struct thread_data *td, struct io_u *io_u,
 		unsigned long long tnsec;
 
 		tnsec = ntime_since(&io_u->start_time, &icd->time);
-		add_lat_sample(td, idx, tnsec, bytes, io_u->offset, io_u_is_prio(io_u));
+		add_lat_sample(td, idx, tnsec, bytes, io_u->offset,
+			       io_u->ioprio, io_u_is_high_prio(io_u));
 
 		if (td->flags & TD_F_PROFILE_OPS) {
 			struct prof_io_ops *ops = &td->prof_io_ops;
@@ -1876,17 +1935,20 @@ static void account_io_completion(struct thread_data *td, struct io_u *io_u,
 				icd->error = ops->io_u_lat(td, tnsec);
 		}
 
-		if (td->o.max_latency && tnsec > td->o.max_latency)
-			lat_fatal(td, icd, tnsec, td->o.max_latency);
-		if (td->o.latency_target && tnsec > td->o.latency_target) {
-			if (lat_target_failed(td))
-				lat_fatal(td, icd, tnsec, td->o.latency_target);
+		if (ddir_rw(idx)) {
+			if (td->o.max_latency[idx] && tnsec > td->o.max_latency[idx])
+				lat_fatal(td, io_u, icd, tnsec, td->o.max_latency[idx]);
+			if (td->o.latency_target && tnsec > td->o.latency_target) {
+				if (lat_target_failed(td))
+					lat_fatal(td, io_u, icd, tnsec, td->o.latency_target);
+			}
 		}
 	}
 
 	if (ddir_rw(idx)) {
 		if (!td->o.disable_clat) {
-			add_clat_sample(td, idx, llnsec, bytes, io_u->offset, io_u_is_prio(io_u));
+			add_clat_sample(td, idx, llnsec, bytes, io_u->offset,
+					io_u->ioprio, io_u_is_high_prio(io_u));
 			io_u_mark_latency(td, llnsec);
 		}
 
@@ -1952,8 +2014,8 @@ static void io_completed(struct thread_data *td, struct io_u **io_u_ptr,
 		if (io_u->error)
 			unlog_io_piece(td, io_u);
 		else {
-			io_u->ipo->flags &= ~IP_F_IN_FLIGHT;
-			write_barrier();
+			atomic_store_release(&io_u->ipo->flags,
+					io_u->ipo->flags & ~IP_F_IN_FLIGHT);
 		}
 	}
 
@@ -1972,8 +2034,23 @@ static void io_completed(struct thread_data *td, struct io_u **io_u_ptr,
 	td->last_ddir = ddir;
 
 	if (!io_u->error && ddir_rw(ddir)) {
-		unsigned long long bytes = io_u->buflen - io_u->resid;
+		unsigned long long bytes = io_u->xfer_buflen - io_u->resid;
 		int ret;
+
+		/*
+		 * Make sure we notice short IO from here, and requeue them
+		 * appropriately!
+		 */
+		if (bytes && io_u->resid) {
+			io_u->xfer_buflen = io_u->resid;
+			io_u->xfer_buf += bytes;
+			io_u->offset += bytes;
+			td->ts.short_io_u[io_u->ddir]++;
+			if (io_u->offset < io_u->file->real_file_size) {
+				requeue_io_u(td, io_u_ptr);
+				return;
+			}
+		}
 
 		td->io_blocks[ddir]++;
 		td->io_bytes[ddir] += bytes;
@@ -2128,7 +2205,7 @@ void io_u_queued(struct thread_data *td, struct io_u *io_u)
 			td = td->parent;
 
 		add_slat_sample(td, io_u->ddir, slat_time, io_u->xfer_buflen,
-				io_u->offset, io_u_is_prio(io_u));
+				io_u->offset, io_u->ioprio);
 	}
 }
 
@@ -2138,6 +2215,7 @@ void io_u_queued(struct thread_data *td, struct io_u *io_u)
 static struct frand_state *get_buf_state(struct thread_data *td)
 {
 	unsigned int v;
+	unsigned long long i;
 
 	if (!td->o.dedupe_percentage)
 		return &td->buf_state;
@@ -2149,7 +2227,24 @@ static struct frand_state *get_buf_state(struct thread_data *td)
 	v = rand_between(&td->dedupe_state, 1, 100);
 
 	if (v <= td->o.dedupe_percentage)
-		return &td->buf_state_prev;
+		switch (td->o.dedupe_mode) {
+		case DEDUPE_MODE_REPEAT:
+			/*
+			* The caller advances the returned frand_state.
+			* A copy of prev should be returned instead since
+			* a subsequent intention to generate a deduped buffer
+			* might result in generating a unique one
+			*/
+			frand_copy(&td->buf_state_ret, &td->buf_state_prev);
+			return &td->buf_state_ret;
+		case DEDUPE_MODE_WORKING_SET:
+			i = rand_between(&td->dedupe_working_set_index_state, 0, td->num_unique_pages - 1);
+			frand_copy(&td->buf_state_ret, &td->dedupe_working_set_states[i]);
+			return &td->buf_state_ret;
+		default:
+			log_err("unexpected dedupe mode %u\n", td->o.dedupe_mode);
+			assert(0);
+		}
 
 	return &td->buf_state;
 }
@@ -2172,27 +2267,30 @@ void fill_io_buffer(struct thread_data *td, void *buf, unsigned long long min_wr
 
 	if (o->compress_percentage || o->dedupe_percentage) {
 		unsigned int perc = td->o.compress_percentage;
-		struct frand_state *rs;
+		struct frand_state *rs = NULL;
 		unsigned long long left = max_bs;
 		unsigned long long this_write;
 
 		do {
-			rs = get_buf_state(td);
+			/*
+			 * Buffers are either entirely dedupe-able or not.
+			 * If we choose to dedup, the buffer should undergo
+			 * the same manipulation as the original write. Which
+			 * means we should retrack the steps we took for compression
+			 * as well.
+			 */
+			if (!rs)
+				rs = get_buf_state(td);
 
 			min_write = min(min_write, left);
 
-			if (perc) {
-				this_write = min_not_zero(min_write,
-							(unsigned long long) td->o.compress_chunk);
+			this_write = min_not_zero(min_write,
+						(unsigned long long) td->o.compress_chunk);
 
-				fill_random_buf_percentage(rs, buf, perc,
-					this_write, this_write,
-					o->buffer_pattern,
-					o->buffer_pattern_bytes);
-			} else {
-				fill_random_buf(rs, buf, min_write);
-				this_write = min_write;
-			}
+			fill_random_buf_percentage(rs, buf, perc,
+				this_write, this_write,
+				o->buffer_pattern,
+				o->buffer_pattern_bytes);
 
 			buf += this_write;
 			left -= this_write;
@@ -2265,10 +2363,19 @@ int do_io_u_trim(const struct thread_data *td, struct io_u *io_u)
 	struct fio_file *f = io_u->file;
 	int ret;
 
+	if (td->o.zone_mode == ZONE_MODE_ZBD) {
+		ret = zbd_do_io_u_trim(td, io_u);
+		if (ret == io_u_completed)
+			return io_u->xfer_buflen;
+		if (ret)
+			goto err;
+	}
+
 	ret = os_trim(f, io_u->offset, io_u->xfer_buflen);
 	if (!ret)
 		return io_u->xfer_buflen;
 
+err:
 	io_u->error = ret;
 	return 0;
 #endif

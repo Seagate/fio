@@ -12,13 +12,15 @@
 #include "../optgroup.h"
 
 struct rados_data {
-        rados_t cluster;
-        rados_ioctx_t io_ctx;
-        struct io_u **aio_events;
-        bool connected;
-        pthread_mutex_t completed_lock;
-        pthread_cond_t completed_more_io;
-        struct flist_head completed_operations;
+	rados_t cluster;
+	rados_ioctx_t io_ctx;
+	struct io_u **aio_events;
+	bool connected;
+	pthread_mutex_t completed_lock;
+	pthread_cond_t completed_more_io;
+	struct flist_head completed_operations;
+	uint64_t ops_scheduled;
+	uint64_t ops_completed;
 };
 
 struct fio_rados_iou {
@@ -36,6 +38,7 @@ struct rados_options {
 	char *pool_name;
 	char *client_name;
 	int busy_poll;
+	int touch_objects;
 };
 
 static struct fio_option options[] = {
@@ -77,6 +80,16 @@ static struct fio_option options[] = {
 		.group    = FIO_OPT_G_RBD,
 	},
 	{
+		.name     = "touch_objects",
+		.lname    = "touch objects on start",
+		.type     = FIO_OPT_BOOL,
+		.help     = "Touch (create) objects on start",
+		.off1     = offsetof(struct rados_options, touch_objects),
+		.def	  = "1",
+		.category = FIO_OPT_C_ENGINE,
+		.group    = FIO_OPT_G_RBD,
+	},
+	{
 		.name     = NULL,
 	},
 };
@@ -101,6 +114,8 @@ static int _fio_setup_rados_data(struct thread_data *td,
 	pthread_mutex_init(&rados->completed_lock, NULL);
 	pthread_cond_init(&rados->completed_more_io, NULL);
 	INIT_FLIST_HEAD(&rados->completed_operations);
+	rados->ops_scheduled = 0;
+	rados->ops_completed = 0;
 	*rados_data_ptr = rados;
 	return 0;
 
@@ -190,9 +205,11 @@ static int _fio_rados_connect(struct thread_data *td)
 	for (i = 0; i < td->o.nr_files; i++) {
 		f = td->files[i];
 		f->real_file_size = file_size;
-		r = rados_write(rados->io_ctx, f->file_name, "", 0, 0);
-		if (r < 0) {
-			goto failed_obj_create;
+		if (o->touch_objects) {
+			r = rados_write(rados->io_ctx, f->file_name, "", 0, 0);
+			if (r < 0) {
+				goto failed_obj_create;
+			}
 		}
 	}
 	return 0;
@@ -227,8 +244,11 @@ static void _fio_rados_disconnect(struct rados_data *rados)
 static void fio_rados_cleanup(struct thread_data *td)
 {
 	struct rados_data *rados = td->io_ops_data;
-
 	if (rados) {
+		pthread_mutex_lock(&rados->completed_lock);
+		while (rados->ops_scheduled != rados->ops_completed)
+			pthread_cond_wait(&rados->completed_more_io, &rados->completed_lock);
+		pthread_mutex_unlock(&rados->completed_lock);
 		_fio_rados_rm_objects(td, rados);
 		_fio_rados_disconnect(rados);
 		free(rados->aio_events);
@@ -244,6 +264,7 @@ static void complete_callback(rados_completion_t cb, void *arg)
 	assert(rados_aio_is_complete(fri->completion));
 	pthread_mutex_lock(&rados->completed_lock);
 	flist_add_tail(&fri->list, &rados->completed_operations);
+	rados->ops_completed++;
 	pthread_mutex_unlock(&rados->completed_lock);
 	pthread_cond_signal(&rados->completed_more_io);
 }
@@ -272,6 +293,7 @@ static enum fio_q_status fio_rados_queue(struct thread_data *td,
 			log_err("rados_write failed.\n");
 			goto failed_comp;
 		}
+		rados->ops_scheduled++;
 		return FIO_Q_QUEUED;
 	} else if (io_u->ddir == DDIR_READ) {
 		r = rados_aio_create_completion(fri, complete_callback,
@@ -286,6 +308,7 @@ static enum fio_q_status fio_rados_queue(struct thread_data *td,
 			log_err("rados_aio_read failed.\n");
 			goto failed_comp;
 		}
+		rados->ops_scheduled++;
 		return FIO_Q_QUEUED;
 	} else if (io_u->ddir == DDIR_TRIM) {
 		r = rados_aio_create_completion(fri, complete_callback,
@@ -307,6 +330,7 @@ static enum fio_q_status fio_rados_queue(struct thread_data *td,
 			log_err("rados_aio_write_op_operate failed.\n");
 			goto failed_write_op;
 		}
+		rados->ops_scheduled++;
 		return FIO_Q_QUEUED;
 	 }
 
@@ -341,7 +365,7 @@ int fio_rados_getevents(struct thread_data *td, unsigned int min,
 			pthread_cond_wait(&rados->completed_more_io, &rados->completed_lock);
 		}
 		assert(!flist_empty(&rados->completed_operations));
-		
+
 		fri = flist_first_entry(&rados->completed_operations, struct fio_rados_iou, list);
 		assert(fri->completion);
 		assert(rados_aio_is_complete(fri->completion));
@@ -433,7 +457,7 @@ static int fio_rados_io_u_init(struct thread_data *td, struct io_u *io_u)
 }
 
 /* ioengine_ops for get_ioengine() */
-static struct ioengine_ops ioengine = {
+FIO_STATIC struct ioengine_ops ioengine = {
 	.name = "rados",
 	.version		= FIO_IOOPS_VERSION,
 	.flags			= FIO_DISKLESSIO,

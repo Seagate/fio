@@ -40,21 +40,25 @@ unsigned long long gauss_next(struct gauss_state *gs)
 	if (!gs->disable_hash)
 		sum = __hash_u64(sum);
 
-	return sum % gs->nranges;
+	return (sum + gs->rand_off) % gs->nranges;
 }
 
 void gauss_init(struct gauss_state *gs, unsigned long nranges, double dev,
-		unsigned int seed)
+		double center, unsigned int seed)
 {
 	memset(gs, 0, sizeof(*gs));
 	init_rand_seed(&gs->r, seed, 0);
 	gs->nranges = nranges;
 
 	if (dev != 0.0) {
-		gs->stddev = ceil((double) (nranges * 100.0) / dev);
+		gs->stddev = ceil((double)(nranges * dev) / 100.0);
 		if (gs->stddev > nranges / 2)
 			gs->stddev = nranges / 2;
 	}
+	if (center == -1)
+	  gs->rand_off = 0;
+	else
+	  gs->rand_off = nranges * (center - 0.5);
 }
 
 void gauss_disable_hash(struct gauss_state *gs)

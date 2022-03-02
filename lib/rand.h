@@ -6,7 +6,9 @@
 #include "types.h"
 
 #define FRAND32_MAX	(-1U)
+#define FRAND32_MAX_PLUS_ONE	(1.0 * (1ULL << 32))
 #define FRAND64_MAX	(-1ULL)
+#define FRAND64_MAX_PLUS_ONE	(1.0 * (1ULL << 32) * (1ULL << 32))
 
 struct taus88_state {
 	unsigned int s1, s2, s3;
@@ -106,11 +108,11 @@ static inline double __rand_0_1(struct frand_state *state)
 	if (state->use64) {
 		uint64_t val = __rand64(&state->state64);
 
-		return (val + 1.0) / (FRAND64_MAX + 1.0);
+		return (val + 1.0) / FRAND64_MAX_PLUS_ONE;
 	} else {
 		uint32_t val = __rand32(&state->state32);
 
-		return (val + 1.0) / (FRAND32_MAX + 1.0);
+		return (val + 1.0) / FRAND32_MAX_PLUS_ONE;
 	}
 }
 
@@ -122,7 +124,7 @@ static inline uint32_t rand32_upto(struct frand_state *state, uint32_t end)
 
 	r = __rand32(&state->state32);
 	end++;
-	return (int) ((double)end * (r / (FRAND32_MAX + 1.0)));
+	return (int) ((double)end * (r / FRAND32_MAX_PLUS_ONE));
 }
 
 static inline uint64_t rand64_upto(struct frand_state *state, uint64_t end)
@@ -133,7 +135,7 @@ static inline uint64_t rand64_upto(struct frand_state *state, uint64_t end)
 
 	r = __rand64(&state->state64);
 	end++;
-	return (uint64_t) ((double)end * (r / (FRAND64_MAX + 1.0)));
+	return (uint64_t) ((double)end * (r / FRAND64_MAX_PLUS_ONE));
 }
 
 /*
@@ -148,8 +150,19 @@ static inline uint64_t rand_between(struct frand_state *state, uint64_t start,
 		return start + rand32_upto(state, end - start);
 }
 
+static inline uint64_t __get_next_seed(struct frand_state *fs)
+{
+	uint64_t r = __rand(fs);
+
+	if (sizeof(int) != sizeof(long *))
+		r *= (unsigned long) __rand(fs);
+
+	return r;
+}
+
 extern void init_rand(struct frand_state *, bool);
-extern void init_rand_seed(struct frand_state *, unsigned int seed, bool);
+extern void init_rand_seed(struct frand_state *, uint64_t seed, bool);
+void __init_rand64(struct taus258_state *state, uint64_t seed);
 extern void __fill_random_buf(void *buf, unsigned int len, uint64_t seed);
 extern uint64_t fill_random_buf(struct frand_state *, void *buf, unsigned int len);
 extern void __fill_random_buf_percentage(uint64_t, void *, unsigned int, unsigned int, unsigned int, char *, unsigned int);

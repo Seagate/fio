@@ -14,13 +14,15 @@
 #include <errno.h>
 #include <sched.h>
 #include <linux/unistd.h>
-#include <linux/raw.h>
 #include <linux/major.h>
 #include <linux/fs.h>
 #include <scsi/sg.h>
 
 #ifdef ARCH_HAVE_CRC_CRYPTO
 #include <sys/auxv.h>
+#ifndef HWCAP_PMULL
+#define HWCAP_PMULL             (1 << 4)
+#endif /* HWCAP_PMULL */
 #ifndef HWCAP_CRC32
 #define HWCAP_CRC32             (1 << 7)
 #endif /* HWCAP_CRC32 */
@@ -41,7 +43,6 @@
 #define FIO_HAVE_IOSCHED_SWITCH
 #define FIO_HAVE_ODIRECT
 #define FIO_HAVE_HUGETLB
-#define FIO_HAVE_RAWBIND
 #define FIO_HAVE_BLKTRACE
 #define FIO_HAVE_CL_SIZE
 #define FIO_HAVE_CGROUPS
@@ -58,6 +59,8 @@
 
 #define OS_MAP_ANON		MAP_ANONYMOUS
 
+#define FIO_EXT_ENG_DIR	"/usr/local/lib/fio"
+
 typedef cpu_set_t os_cpu_mask_t;
 
 #ifdef CONFIG_3ARG_AFFINITY
@@ -70,6 +73,12 @@ typedef cpu_set_t os_cpu_mask_t;
 	sched_setaffinity((pid), &(cpumask))
 #define fio_getaffinity(pid, ptr)	\
 	sched_getaffinity((pid), (ptr))
+#endif
+
+#ifdef CONFIG_PTHREAD_GETAFFINITY
+#define FIO_HAVE_GET_THREAD_AFFINITY
+#define fio_get_thread_affinity(mask)	\
+	pthread_getaffinity_np(pthread_self(), sizeof(mask), &(mask))
 #endif
 
 #define fio_cpu_clear(mask, cpu)	(void) CPU_CLR((cpu), (mask))
@@ -112,16 +121,26 @@ enum {
 #define IOPRIO_MIN_PRIO_CLASS	0
 #define IOPRIO_MAX_PRIO_CLASS	3
 
-static inline int ioprio_set(int which, int who, int ioprio_class, int ioprio)
+static inline int ioprio_value(int ioprio_class, int ioprio)
 {
 	/*
 	 * If no class is set, assume BE
 	 */
-	if (!ioprio_class)
-		ioprio_class = IOPRIO_CLASS_BE;
+        if (!ioprio_class)
+                ioprio_class = IOPRIO_CLASS_BE;
 
-	ioprio |= ioprio_class << IOPRIO_CLASS_SHIFT;
-	return syscall(__NR_ioprio_set, which, who, ioprio);
+	return (ioprio_class << IOPRIO_CLASS_SHIFT) | ioprio;
+}
+
+static inline bool ioprio_value_is_class_rt(unsigned int priority)
+{
+	return (priority >> IOPRIO_CLASS_SHIFT) == IOPRIO_CLASS_RT;
+}
+
+static inline int ioprio_set(int which, int who, int ioprio_class, int ioprio)
+{
+	return syscall(__NR_ioprio_set, which, who,
+		       ioprio_value(ioprio_class, ioprio));
 }
 
 #ifndef CONFIG_HAVE_GETTID
@@ -168,36 +187,6 @@ static inline unsigned long long os_phys_mem(void)
 		return 0;
 
 	return (unsigned long long) pages * (unsigned long long) pagesize;
-}
-
-static inline int fio_lookup_raw(dev_t dev, int *majdev, int *mindev)
-{
-	struct raw_config_request rq;
-	int fd;
-
-	if (major(dev) != RAW_MAJOR)
-		return 1;
-
-	/*
-	 * we should be able to find /dev/rawctl or /dev/raw/rawctl
-	 */
-	fd = open("/dev/rawctl", O_RDONLY);
-	if (fd < 0) {
-		fd = open("/dev/raw/rawctl", O_RDONLY);
-		if (fd < 0)
-			return 1;
-	}
-
-	rq.raw_minor = minor(dev);
-	if (ioctl(fd, RAW_GETBIND, &rq) < 0) {
-		close(fd);
-		return 1;
-	}
-
-	close(fd);
-	*majdev = rq.block_major;
-	*mindev = rq.block_minor;
-	return 0;
 }
 
 #ifdef O_NOATIME
@@ -325,6 +314,13 @@ static inline int fio_set_sched_idle(void)
 #ifndef RWF_SYNC
 #define RWF_SYNC	0x00000004
 #endif
+#ifndef RWF_NOWAIT
+#define RWF_NOWAIT	0x00000008
+#endif
+
+#ifndef RWF_UNCACHED
+#define RWF_UNCACHED	0x00000040
+#endif
 
 #ifndef RWF_UNCACHED
 #define RWF_UNCACHED	0x00000040
@@ -416,7 +412,8 @@ static inline bool os_cpu_has(cpu_features feature)
 #ifdef ARCH_HAVE_CRC_CRYPTO
 	case CPU_ARM64_CRC32C:
 		hwcap = getauxval(AT_HWCAP);
-		have_feature = (hwcap & HWCAP_CRC32) != 0;
+		have_feature = (hwcap & (HWCAP_PMULL | HWCAP_CRC32)) ==
+			       (HWCAP_PMULL | HWCAP_CRC32);
 		break;
 #endif
 	default:

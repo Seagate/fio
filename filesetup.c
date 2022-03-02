@@ -226,18 +226,22 @@ static int extend_file(struct thread_data *td, struct fio_file *f)
 			if (r < 0) {
 				int __e = errno;
 
-				if (__e == ENOSPC) {
+				if (__e == ENOSPC || __e == EDQUOT) {
+					const char *__e_name;
 					if (td->o.fill_device)
 						break;
-					log_info("fio: ENOSPC on laying out "
-						 "file, stopping\n");
-					break;
+					if (__e == ENOSPC)
+						__e_name = "ENOSPC";
+					else
+						__e_name = "EDQUOT";
+					log_info("fio: %s on laying out "
+						 "file, stopping\n", __e_name);
 				}
 				td_verror(td, errno, "write");
 			} else
 				td_verror(td, EIO, "write");
 
-			break;
+			goto err;
 		}
 	}
 
@@ -337,6 +341,95 @@ error:
 
 	free(b);
 	return ret;
+}
+
+/*
+ * Generic function to prepopulate regular file with data.
+ * Useful if you want to make sure I/O engine has data to read.
+ * Leaves f->fd open on success, caller must close.
+ */
+int generic_prepopulate_file(struct thread_data *td, struct fio_file *f)
+{
+	int flags;
+	unsigned long long left, bs;
+	char *b = NULL;
+
+	/* generic function for regular files only */
+	assert(f->filetype == FIO_TYPE_FILE);
+
+	if (read_only) {
+		log_err("fio: refusing to write a file due to read-only\n");
+		return 0;
+	}
+
+	flags = O_WRONLY;
+	if (td->o.allow_create)
+		flags |= O_CREAT;
+
+#ifdef WIN32
+	flags |= _O_BINARY;
+#endif
+
+	dprint(FD_FILE, "open file %s, flags %x\n", f->file_name, flags);
+	f->fd = open(f->file_name, flags, 0644);
+	if (f->fd < 0) {
+		int err = errno;
+
+		if (err == ENOENT && !td->o.allow_create)
+			log_err("fio: file creation disallowed by "
+					"allow_file_create=0\n");
+		else
+			td_verror(td, err, "open");
+		return 1;
+	}
+
+	left = f->real_file_size;
+	bs = td->o.max_bs[DDIR_WRITE];
+	if (bs > left)
+		bs = left;
+
+	b = malloc(bs);
+	if (!b) {
+		td_verror(td, errno, "malloc");
+		goto err;
+	}
+
+	while (left && !td->terminate) {
+		ssize_t r;
+
+		if (bs > left)
+			bs = left;
+
+		fill_io_buffer(td, b, bs, bs);
+
+		r = write(f->fd, b, bs);
+
+		if (r > 0) {
+			left -= r;
+		} else {
+			td_verror(td, errno, "write");
+			goto err;
+		}
+	}
+
+	if (td->terminate) {
+		dprint(FD_FILE, "terminate unlink %s\n", f->file_name);
+		td_io_unlink_file(td, f);
+	} else if (td->o.create_fsync) {
+		if (fsync(f->fd) < 0) {
+			td_verror(td, errno, "fsync");
+			goto err;
+		}
+	}
+
+	free(b);
+	return 0;
+err:
+	close(f->fd);
+	f->fd = -1;
+	if (b)
+		free(b);
+	return 1;
 }
 
 unsigned long long get_rand_file_size(struct thread_data *td)
@@ -655,8 +748,7 @@ int generic_open_file(struct thread_data *td, struct fio_file *f)
 		}
 		flags |= OS_O_DIRECT | FIO_O_ATOMIC;
 	}
-	if (td->o.sync_io)
-		flags |= O_SYNC;
+	flags |= td->o.sync_io;
 	if (td->o.create_on_open && td->o.allow_create)
 		flags |= O_CREAT;
 skip_flags:
@@ -817,7 +909,7 @@ static unsigned long long get_fs_free_counts(struct thread_data *td)
 		} else if (f->filetype != FIO_TYPE_FILE)
 			continue;
 
-		snprintf(buf, ARRAY_SIZE(buf), "%s", f->file_name);
+		snprintf(buf, FIO_ARRAY_SIZE(buf), "%s", f->file_name);
 
 		if (stat(buf, &sb) < 0) {
 			if (errno != ENOENT)
@@ -840,7 +932,7 @@ static unsigned long long get_fs_free_counts(struct thread_data *td)
 			continue;
 
 		fm = calloc(1, sizeof(*fm));
-		snprintf(fm->__base, ARRAY_SIZE(fm->__base), "%s", buf);
+		snprintf(fm->__base, FIO_ARRAY_SIZE(fm->__base), "%s", buf);
 		fm->base = basename(fm->__base);
 		fm->key = sb.st_dev;
 		flist_add(&fm->list, &list);
@@ -913,15 +1005,60 @@ uint64_t get_start_offset(struct thread_data *td, struct fio_file *f)
 	return offset;
 }
 
+/*
+ * Find longest path component that exists and return its length
+ */
+int longest_existing_path(char *path) {
+	char buf[PATH_MAX];
+	bool done;
+	char *buf_pos;
+	int offset;
+#ifdef WIN32
+	DWORD dwAttr;
+#else
+	struct stat sb;
+#endif
+
+	sprintf(buf, "%s", path);
+	done = false;
+	while (!done) {
+		buf_pos = strrchr(buf, FIO_OS_PATH_SEPARATOR);
+		if (!buf_pos) {
+			offset = 0;
+			break;
+		}
+
+		*(buf_pos + 1) = '\0';
+
+#ifdef WIN32
+		dwAttr = GetFileAttributesA(buf);
+		if (dwAttr != INVALID_FILE_ATTRIBUTES) {
+			done = true;
+		}
+#else
+		if (stat(buf, &sb) == 0)
+			done = true;
+#endif
+		if (done)
+			offset = buf_pos - buf;
+		else
+			*buf_pos = '\0';
+	}
+
+	return offset;
+}
+
 static bool create_work_dirs(struct thread_data *td, const char *fname)
 {
 	char path[PATH_MAX];
 	char *start, *end;
+	int offset;
 
 	snprintf(path, PATH_MAX, "%s", fname);
 	start = path;
 
-	end = start;
+	offset = longest_existing_path(path);
+	end = start + offset;
 	while ((end = strchr(end, FIO_OS_PATH_SEPARATOR)) != NULL) {
 		if (end == start) {
 			end++;
@@ -930,8 +1067,8 @@ static bool create_work_dirs(struct thread_data *td, const char *fname)
 		*end = '\0';
 		errno = 0;
 		if (fio_mkdir(path, 0700) && errno != EEXIST) {
-			log_err("fio: failed to create dir (%s): %d\n",
-				start, errno);
+			log_err("fio: failed to create dir (%s): %s\n",
+				start, strerror(errno));
 			return false;
 		}
 		*end = FIO_OS_PATH_SEPARATOR;
@@ -981,6 +1118,13 @@ int setup_files(struct thread_data *td)
 
 	if (err)
 		goto err_out;
+
+	if (td->o.zone_mode == ZONE_MODE_ZBD) {
+		err = zbd_init_files(td);
+		if (err)
+			goto err_out;
+	}
+	zbd_recalc_options_with_zone_granularity(td);
 
 	if (o->read_iolog_file)
 		goto done;
@@ -1093,6 +1237,8 @@ int setup_files(struct thread_data *td)
 		if (f->io_size == -1ULL)
 			total_size = -1ULL;
 		else {
+			uint64_t io_size;
+
                         if (o->size_percent && o->size_percent != 100) {
 				uint64_t file_size;
 
@@ -1104,7 +1250,14 @@ int setup_files(struct thread_data *td)
 
 				f->io_size -= (f->io_size % td_min_bs(td));
 			}
-			total_size += f->io_size;
+
+			io_size = f->io_size;
+			if (o->io_size_percent && o->io_size_percent != 100) {
+				io_size *= o->io_size_percent;
+				io_size /= 100;
+			}
+
+			total_size += io_size;
 		}
 
 		if (f->filetype == FIO_TYPE_FILE &&
@@ -1146,7 +1299,7 @@ int setup_files(struct thread_data *td)
 		o->size = total_size;
 
 	if (o->size < td_min_bs(td)) {
-		log_err("fio: blocksize too large for data set\n");
+		log_err("fio: blocksize is larger than data set range\n");
 		goto err_out;
 	}
 
@@ -1205,6 +1358,43 @@ int setup_files(struct thread_data *td)
 		goto err_out;
 
 	/*
+	 * Prepopulate files with data. It might be expected to read some
+	 * "real" data instead of zero'ed files (if no writes to file occurred
+	 * prior to a read job). Engine has to provide a way to do that.
+	 */
+	if (td->io_ops->prepopulate_file) {
+		temp_stall_ts = 1;
+
+		for_each_file(td, f, i) {
+			if (output_format & FIO_OUTPUT_NORMAL) {
+				log_info("%s: Prepopulating IO file (%s)\n",
+							o->name, f->file_name);
+			}
+
+			err = td->io_ops->prepopulate_file(td, f);
+			if (err)
+				break;
+
+			err = __file_invalidate_cache(td, f, f->file_offset,
+								f->io_size);
+
+			/*
+			 * Shut up static checker
+			 */
+			if (f->fd != -1)
+				close(f->fd);
+
+			f->fd = -1;
+			if (err)
+				break;
+		}
+		temp_stall_ts = 0;
+	}
+
+	if (err)
+		goto err_out;
+
+	/*
 	 * iolog already set the total io size, if we read back
 	 * stored entries.
 	 */
@@ -1216,16 +1406,17 @@ int setup_files(struct thread_data *td)
 	}
 
 done:
+	if (td->o.zone_mode == ZONE_MODE_ZBD) {
+		err = zbd_setup_files(td);
+		if (err)
+			goto err_out;
+	}
+
 	if (o->create_only)
 		td->done = 1;
 
 	td_restore_runstate(td, old_state);
 
-	if (td->o.zone_mode == ZONE_MODE_ZBD) {
-		err = zbd_init(td);
-		if (err)
-			goto err_out;
-	}
 	return 0;
 
 err_offset:
@@ -1266,11 +1457,11 @@ static void __init_rand_distribution(struct thread_data *td, struct fio_file *f)
 		seed = td->rand_seeds[4];
 
 	if (td->o.random_distribution == FIO_RAND_DIST_ZIPF)
-		zipf_init(&f->zipf, nranges, td->o.zipf_theta.u.f, seed);
+		zipf_init(&f->zipf, nranges, td->o.zipf_theta.u.f, td->o.random_center.u.f, seed);
 	else if (td->o.random_distribution == FIO_RAND_DIST_PARETO)
-		pareto_init(&f->zipf, nranges, td->o.pareto_h.u.f, seed);
+		pareto_init(&f->zipf, nranges, td->o.pareto_h.u.f, td->o.random_center.u.f, seed);
 	else if (td->o.random_distribution == FIO_RAND_DIST_GAUSS)
-		gauss_init(&f->gauss, nranges, td->o.gauss_dev.u.f, seed);
+		gauss_init(&f->gauss, nranges, td->o.gauss_dev.u.f, td->o.random_center.u.f, seed);
 }
 
 static bool init_rand_distribution(struct thread_data *td)
@@ -1399,11 +1590,23 @@ void close_files(struct thread_data *td)
 	}
 }
 
+void fio_file_free(struct fio_file *f)
+{
+	if (fio_file_axmap(f))
+		axmap_free(f->io_axmap);
+	if (!fio_file_smalloc(f)) {
+		free(f->file_name);
+		free(f);
+	} else {
+		sfree(f->file_name);
+		sfree(f);
+	}
+}
+
 void close_and_free_files(struct thread_data *td)
 {
 	struct fio_file *f;
 	unsigned int i;
-	bool use_free = td_ioengine_flagged(td, FIO_NOFILEHASH);
 
 	dprint(FD_FILE, "close files\n");
 
@@ -1423,21 +1626,8 @@ void close_and_free_files(struct thread_data *td)
 			td_io_unlink_file(td, f);
 		}
 
-		zbd_free_zone_info(f);
-
-		if (use_free)
-			free(f->file_name);
-		else
-			sfree(f->file_name);
-		f->file_name = NULL;
-		if (fio_file_axmap(f)) {
-			axmap_free(f->io_axmap);
-			f->io_axmap = NULL;
-		}
-		if (use_free)
-			free(f);
-		else
-			sfree(f);
+		zbd_close_file(f);
+		fio_file_free(f);
 	}
 
 	td->o.filename = NULL;
@@ -1563,6 +1753,8 @@ static struct fio_file *alloc_new_file(struct thread_data *td)
 	f->fd = -1;
 	f->shadow_fd = -1;
 	fio_file_reset(td, f);
+	if (!td_ioengine_flagged(td, FIO_NOFILEHASH))
+		fio_file_set_smalloc(f);
 	return f;
 }
 

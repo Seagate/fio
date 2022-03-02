@@ -44,7 +44,8 @@ print_config() {
 }
 
 # Default CFLAGS
-CFLAGS="-D_GNU_SOURCE -include config-host.h"
+CFLAGS="-D_GNU_SOURCE -include config-host.h $CFLAGS"
+CONFIGURE_CFLAGS="-Werror-implicit-function-declaration"
 BUILD_CFLAGS=""
 
 # Print a helpful header at the top of config.log
@@ -88,14 +89,14 @@ do_cc() {
 }
 
 compile_object() {
-  do_cc $CFLAGS -Werror-implicit-function-declaration -c -o $TMPO $TMPC
+  do_cc $CFLAGS $CONFIGURE_CFLAGS -c -o $TMPO $TMPC
 }
 
 compile_prog() {
   local_cflags="$1"
   local_ldflags="$2 $LIBS"
   echo "Compiling test case $3" >> config.log
-  do_cc $CFLAGS -Werror-implicit-function-declaration $local_cflags -o $TMPE $TMPC $LDFLAGS $local_ldflags
+  do_cc $CFLAGS $CONFIGURE_CFLAGS $local_cflags -o $TMPE $TMPC $LDFLAGS $local_ldflags
 }
 
 feature_not_found() {
@@ -133,6 +134,23 @@ output_sym() {
   echo "#define $1" >> $config_host_h
 }
 
+check_min_lib_version() {
+  _feature=$3
+
+  if "${cross_prefix}"pkg-config --atleast-version="$2" "$1" > /dev/null 2>&1; then
+    return 0
+  fi
+  : "${_feature:=${1}}"
+  if "${cross_prefix}"pkg-config --version > /dev/null 2>&1; then
+    if test "$(eval echo \"\$$_feature\")" = "yes" ; then
+      feature_not_found "$_feature" "$1 >= $2"
+    fi
+  else
+    print_config "$1" "missing pkg-config, can't check $_feature version"
+  fi
+  return 1
+}
+
 targetos=""
 cpu=""
 
@@ -144,13 +162,18 @@ libhdfs="no"
 pmemblk="no"
 devdax="no"
 pmem="no"
+cuda="no"
+libcufile="no"
 disable_lex=""
 disable_pmem="no"
 disable_native="no"
 march_set="no"
 libiscsi="no"
 libnbd="no"
-libaio_uring="no"
+libnfs="no"
+libzbc=""
+dfs=""
+dynamic_engines="no"
 prefix=/usr/local
 
 # parse options
@@ -172,6 +195,8 @@ for opt do
   --build-32bit-win) build_32bit_win="yes"
   ;;
   --target-win-ver=*) target_win_ver="$optarg"
+  ;;
+  --enable-pdb) pdb="yes"
   ;;
   --build-static) build_static="yes"
   ;;
@@ -201,7 +226,9 @@ for opt do
   ;;
   --disable-pmem) disable_pmem="yes"
   ;;
-  --enable-cuda) enable_cuda="yes"
+  --enable-cuda) cuda="yes"
+  ;;
+  --enable-libcufile) libcufile="yes"
   ;;
   --disable-native) disable_native="yes"
   ;;
@@ -211,9 +238,15 @@ for opt do
   ;;
   --enable-libnbd) libnbd="yes"
   ;;
+  --disable-libzbc) libzbc="no"
+  ;;
   --disable-tcmalloc) disable_tcmalloc="yes"
   ;;
-  --enable-libaio-uring) libaio_uring="yes"
+  --disable-nfs) disable_nfs="yes"
+  ;;
+  --dynamic-libengines) dynamic_engines="yes"
+  ;;
+  --disable-dfs) dfs="no"
   ;;
   --help)
     show_help="yes"
@@ -231,7 +264,8 @@ if test "$show_help" = "yes" ; then
   echo "--cc=                   Specify compiler to use"
   echo "--extra-cflags=         Specify extra CFLAGS to pass to compiler"
   echo "--build-32bit-win       Enable 32-bit build on Windows"
-  echo "--target-win-ver=       Minimum version of Windows to target (XP or 7)"
+  echo "--target-win-ver=       Minimum version of Windows to target (only accepts 7)"
+  echo "--enable-pdb            Enable Windows PDB symbols generation (needs clang/lld)"
   echo "--build-static          Build a static fio"
   echo "--esx                   Configure build options for esx"
   echo "--enable-gfio           Enable building of gtk gfio"
@@ -240,20 +274,25 @@ if test "$show_help" = "yes" ; then
   echo "--disable-rados         Disable Rados support even if found"
   echo "--disable-rbd           Disable Rados Block Device even if found"
   echo "--disable-http          Disable HTTP support even if found"
+  echo "--disable-nfs           Disable userspace NFS support even if found"
   echo "--disable-gfapi         Disable gfapi"
   echo "--enable-libhdfs        Enable hdfs support"
+  echo "--enable-libnfs         Enable nfs support"
   echo "--disable-lex           Disable use of lex/yacc for math"
   echo "--disable-pmem          Disable pmem based engines even if found"
   echo "--enable-lex            Enable use of lex/yacc for math"
   echo "--disable-shm           Disable SHM support"
   echo "--disable-optimizations Don't enable compiler optimizations"
   echo "--enable-cuda           Enable GPUDirect RDMA support"
+  echo "--enable-libcufile      Enable GPUDirect Storage cuFile support"
   echo "--disable-native        Don't build for native host"
   echo "--with-ime=             Install path for DDN's Infinite Memory Engine"
   echo "--enable-libiscsi       Enable iscsi support"
   echo "--enable-libnbd         Enable libnbd (NBD engine) support"
-  echo "--disable-tcmalloc	Disable tcmalloc support"
-  echo "--enable-libaio-uring   Enable libaio emulated over io_uring"
+  echo "--disable-libzbc        Disable libzbc even if found"
+  echo "--disable-tcmalloc  Disable tcmalloc support"
+  echo "--dynamic-libengines  Lib-based ioengines as dynamic libraries"
+  echo "--disable-dfs   Disable DAOS File System support even if found"
   exit $exit_val
 fi
 
@@ -331,16 +370,15 @@ Darwin)
   if test -z "$cpu" && test "$(sysctl -n hw.optional.x86_64)" = "1"; then
     cpu="x86_64"
   fi
-  # Error at compile time linking of weak/partial symbols if possible...
+  # Avoid configure feature detection of features provided by weak symbols
 cat > $TMPC <<EOF
 int main(void)
 {
   return 0;
 }
 EOF
-  if compile_prog "" "-Wl,-no_weak_imports" "disable weak symbols"; then
-    echo "Disabling weak symbols"
-    LDFLAGS="$LDFLAGS -Wl,-no_weak_imports"
+  if compile_prog "" "-Werror=partial-availability" "error on weak symbols"; then
+    CONFIGURE_CFLAGS="$CONFIGURE_CFLAGS -Werror=partial-availability"
   fi
   ;;
 SunOS)
@@ -366,9 +404,7 @@ CYGWIN*)
     # Default Windows API target
     target_win_ver="7"
   fi
-  if test "$target_win_ver" = "XP"; then
-    output_sym "CONFIG_WINDOWS_XP"
-  elif test "$target_win_ver" = "7"; then
+  if test "$target_win_ver" = "7"; then
     output_sym "CONFIG_WINDOWS_7"
     CFLAGS="$CFLAGS -D_WIN32_WINNT=0x0601"
   else
@@ -386,6 +422,8 @@ CYGWIN*)
   clock_gettime="yes" # clock_monotonic probe has dependency on this
   clock_monotonic="yes"
   sched_idle="yes"
+  pthread_condattr_setclock="no"
+  pthread_affinity="no"
   ;;
 esac
 
@@ -547,6 +585,25 @@ fi
 print_config "Static build" "$build_static"
 
 ##########################################
+# check for C11 atomics support
+cat > $TMPC <<EOF
+#include <stdatomic.h>
+int main(void)
+{
+  _Atomic unsigned v;
+  atomic_load(&v);
+  return 0;
+}
+EOF
+if ! compile_prog "" "" "C11 atomics"; then
+  echo
+  echo "Your compiler doesn't support C11 atomics. gcc 4.9/clang 3.6 are the"
+  echo "minimum versions with it - perhaps your compiler is too old?"
+  fatal "C11 atomics support not found"
+fi
+
+
+##########################################
 # check for wordsize
 wordsize="0"
 cat > $TMPC <<EOF
@@ -603,23 +660,33 @@ int main(void)
   return 0;
 }
 EOF
-  if test "$libaio_uring" = "yes" && compile_prog "" "-luring" "libaio io_uring" ; then
+  if compile_prog "" "-laio" "libaio" ; then
     libaio=yes
-    LIBS="-luring $LIBS"
-  elif compile_prog "" "-laio" "libaio" ; then
-    libaio=yes
-    libaio_uring=no
-    LIBS="-laio $LIBS"
   else
     if test "$libaio" = "yes" ; then
       feature_not_found "linux AIO" "libaio-dev or libaio-devel"
     fi
     libaio=no
-    libaio_uring=no
+  fi
+
+  cat > $TMPC <<EOF
+#include <libaio.h>
+#include <stddef.h>
+int main(void)
+{
+  io_prep_preadv2(NULL, 0, NULL, 0, 0, 0);
+  io_prep_pwritev2(NULL, 0, NULL, 0, 0, 0);
+  return 0;
+}
+EOF
+  if compile_prog "" "" "libaio rw flags" ; then
+    libaio_rw_flags=yes
+  else
+    libaio_rw_flags=no
   fi
 fi
 print_config "Linux AIO support" "$libaio"
-print_config "Linux AIO over io_uring" "$libaio_uring"
+print_config "Linux AIO support rw flags" "$libaio_rw_flags"
 
 ##########################################
 # posix aio probe
@@ -702,10 +769,8 @@ print_config "POSIX pshared support" "$posix_pshared"
 
 ##########################################
 # POSIX pthread_condattr_setclock() probe
-if test "$pthread_condattr_setclock" != "yes" ; then
-  pthread_condattr_setclock="no"
-fi
-cat > $TMPC <<EOF
+if test "$pthread_condattr_setclock" != "no" ; then
+  cat > $TMPC <<EOF
 #include <pthread.h>
 int main(void)
 {
@@ -714,11 +779,12 @@ int main(void)
   return 0;
 }
 EOF
-if compile_prog "" "$LIBS" "pthread_condattr_setclock" ; then
-  pthread_condattr_setclock=yes
-elif compile_prog "" "$LIBS -lpthread" "pthread_condattr_setclock" ; then
-  pthread_condattr_setclock=yes
-  LIBS="$LIBS -lpthread"
+  if compile_prog "" "$LIBS" "pthread_condattr_setclock" ; then
+    pthread_condattr_setclock=yes
+  elif compile_prog "" "$LIBS -lpthread" "pthread_condattr_setclock" ; then
+    pthread_condattr_setclock=yes
+    LIBS="$LIBS -lpthread"
+  fi
 fi
 print_config "pthread_condattr_setclock()" "$pthread_condattr_setclock"
 
@@ -742,6 +808,29 @@ elif compile_prog "" "$LIBS -lpthread" "pthread_sigmask" ; then
   LIBS="$LIBS -lpthread"
 fi
 print_config "pthread_sigmask()" "$pthread_sigmask"
+
+##########################################
+# pthread_getaffinity_np() probe
+if test "$pthread_getaffinity" != "yes" ; then
+  pthread_getaffinity="no"
+fi
+cat > $TMPC <<EOF
+#include <stddef.h> /* NULL */
+#include <signal.h> /* pthread_sigmask() */
+#include <pthread.h>
+int main(void)
+{
+  cpu_set_t set;
+  return pthread_getaffinity_np(pthread_self(), sizeof(set), &set);
+}
+EOF
+if compile_prog "" "$LIBS" "pthread_getaffinity" ; then
+  pthread_getaffinity="yes"
+elif compile_prog "" "$LIBS -lpthread" "pthread_getaffinity" ; then
+  pthread_getaffinity="yes"
+  LIBS="$LIBS -lpthread"
+fi
+print_config "pthread_getaffinity_np()" "$pthread_getaffinity"
 
 ##########################################
 # solaris aio probe
@@ -842,7 +931,6 @@ int main(int argc, char **argv)
 EOF
 if test "$disable_rdma" != "yes" && compile_prog "" "-libverbs" "libverbs" ; then
     libverbs="yes"
-    LIBS="-libverbs $LIBS"
 fi
 print_config "libverbs" "$libverbs"
 
@@ -862,9 +950,51 @@ int main(int argc, char **argv)
 EOF
 if test "$disable_rdma" != "yes" && compile_prog "" "-lrdmacm" "rdma"; then
     rdmacm="yes"
-    LIBS="-lrdmacm $LIBS"
 fi
 print_config "rdmacm" "$rdmacm"
+
+##########################################
+# librpma probe
+if test "$librpma" != "yes" ; then
+  librpma="no"
+fi
+cat > $TMPC << EOF
+#include <stdio.h>
+#include <librpma.h>
+int main(int argc, char **argv)
+{
+  enum rpma_conn_event event = RPMA_CONN_REJECTED;
+  (void) event; /* unused */
+  rpma_log_set_threshold(RPMA_LOG_THRESHOLD, RPMA_LOG_LEVEL_INFO);
+  return 0;
+}
+EOF
+if test "$disable_rdma" != "yes" && compile_prog "" "-lrpma" "rpma"; then
+    librpma="yes"
+fi
+print_config "librpma" "$librpma"
+
+##########################################
+# libprotobuf-c probe
+if test "$libprotobuf_c" != "yes" ; then
+  libprotobuf_c="no"
+fi
+cat > $TMPC << EOF
+#include <stdio.h>
+#include <protobuf-c/protobuf-c.h>
+#if !defined(PROTOBUF_C_VERSION_NUMBER)
+# error PROTOBUF_C_VERSION_NUMBER is not defined!
+#endif
+int main(int argc, char **argv)
+{
+  (void)protobuf_c_message_check(NULL);
+  return 0;
+}
+EOF
+if compile_prog "" "-lprotobuf-c" "protobuf_c"; then
+    libprotobuf_c="yes"
+fi
+print_config "libprotobuf_c" "$libprotobuf_c"
 
 ##########################################
 # asprintf() and vasprintf() probes
@@ -876,7 +1006,8 @@ cat > $TMPC << EOF
 
 int main(int argc, char **argv)
 {
-  return asprintf(NULL, "%s", "str") == 0;
+  char *buf;
+  return asprintf(&buf, "%s", "str") == 0;
 }
 EOF
 if compile_prog "" "" "have_asprintf"; then
@@ -892,7 +1023,9 @@ cat > $TMPC << EOF
 
 int main(int argc, char **argv)
 {
-  return vasprintf(NULL, "%s", NULL) == 0;
+  va_list ap;
+  char *buf;
+  return vasprintf(&buf, "%s", ap) == 0;
 }
 EOF
 if compile_prog "" "" "have_vasprintf"; then
@@ -1034,46 +1167,6 @@ fi
 print_config "CLOCK_MONOTONIC" "$clock_monotonic"
 
 ##########################################
-# CLOCK_MONOTONIC_RAW probe
-if test "$clock_monotonic_raw" != "yes" ; then
-  clock_monotonic_raw="no"
-fi
-if test "$clock_gettime" = "yes" ; then
-  cat > $TMPC << EOF
-#include <stdio.h>
-#include <time.h>
-int main(int argc, char **argv)
-{
-  return clock_gettime(CLOCK_MONOTONIC_RAW, NULL);
-}
-EOF
-  if compile_prog "" "$LIBS" "clock monotonic"; then
-      clock_monotonic_raw="yes"
-  fi
-fi
-print_config "CLOCK_MONOTONIC_RAW" "$clock_monotonic_raw"
-
-##########################################
-# CLOCK_MONOTONIC_PRECISE probe
-if test "$clock_monotonic_precise" != "yes" ; then
-  clock_monotonic_precise="no"
-fi
-if test "$clock_gettime" = "yes" ; then
-  cat > $TMPC << EOF
-#include <stdio.h>
-#include <time.h>
-int main(int argc, char **argv)
-{
-  return clock_gettime(CLOCK_MONOTONIC_PRECISE, NULL);
-}
-EOF
-  if compile_prog "" "$LIBS" "clock monotonic precise"; then
-      clock_monotonic_precise="yes"
-  fi
-fi
-print_config "CLOCK_MONOTONIC_PRECISE" "$clock_monotonic_precise"
-
-##########################################
 # clockid_t probe
 if test "$clockid_t" != "yes" ; then
   clockid_t="no"
@@ -1196,7 +1289,7 @@ cat > $TMPC << EOF
 int main(int argc, char **argv)
 {
   unsigned int flags = SYNC_FILE_RANGE_WAIT_BEFORE | SYNC_FILE_RANGE_WRITE |
-			SYNC_FILE_RANGE_WAIT_AFTER;
+      SYNC_FILE_RANGE_WAIT_AFTER;
   return sync_file_range(0, 0, 0, flags);
 }
 EOF
@@ -1246,25 +1339,6 @@ if compile_prog "" "" "linux splice"; then
   linux_splice="yes"
 fi
 print_config "Linux splice(2)" "$linux_splice"
-
-##########################################
-# GUASI probe
-if test "$guasi" != "yes" ; then
-  guasi="no"
-fi
-cat > $TMPC << EOF
-#include <guasi.h>
-#include <guasi_syscalls.h>
-int main(int argc, char **argv)
-{
-  guasi_t ctx = guasi_create(0, 0, 0);
-  return 0;
-}
-EOF
-if compile_prog "" "" "guasi"; then
-  guasi="yes"
-fi
-print_config "GUASI" "$guasi"
 
 ##########################################
 # libnuma probe
@@ -1474,18 +1548,17 @@ if test "$?" != "0" ; then
   echo "configure: gtk and gthread not found"
   exit 1
 fi
-if ! ${cross_prefix}pkg-config --atleast-version 2.18.0 gtk+-2.0; then
-  echo "GTK found, but need version 2.18 or higher"
-  gfio="no"
-else
+gfio="yes"
+if check_min_lib_version gtk+-2.0 2.18.0 "gfio"; then
   if compile_prog "$GTK_CFLAGS" "$GTK_LIBS" "gfio" ; then
-    gfio="yes"
     GFIO_LIBS="$LIBS $GTK_LIBS"
     CFLAGS="$CFLAGS $GTK_CFLAGS"
   else
     echo "Please install gtk and gdk libraries"
     gfio="no"
   fi
+else
+  gfio="no"
 fi
 LDFLAGS=$ORG_LDFLAGS
 fi
@@ -1752,10 +1825,8 @@ if test "$disable_http" != "yes"; then
   if compile_prog "" "$HTTP_LIBS" "curl-new-ssl"; then
     output_sym "CONFIG_HAVE_OPAQUE_HMAC_CTX"
     http="yes"
-    LIBS="$HTTP_LIBS $LIBS"
   elif mv $TMPC2 $TMPC && compile_prog "" "$HTTP_LIBS" "curl-old-ssl"; then
     http="yes"
-    LIBS="$HTTP_LIBS $LIBS"
   fi
 fi
 print_config "http engine" "$http"
@@ -1784,7 +1855,6 @@ int main(int argc, char **argv)
 }
 EOF
 if test "$disable_rados" != "yes"  && compile_prog "" "-lrados" "rados"; then
-  LIBS="-lrados $LIBS"
   rados="yes"
 fi
 print_config "Rados engine" "$rados"
@@ -1815,7 +1885,6 @@ int main(int argc, char **argv)
 }
 EOF
 if test "$disable_rbd" != "yes"  && compile_prog "" "-lrbd -lrados" "rbd"; then
-  LIBS="-lrbd -lrados $LIBS"
   rbd="yes"
 fi
 print_config "Rados Block Device engine" "$rbd"
@@ -1906,7 +1975,6 @@ int main(int argc, char **argv)
 }
 EOF
 if test "$disable_gfapi" != "yes"  && compile_prog "" "-lgfapi -lglusterfs" "gfapi"; then
-  LIBS="-lgfapi -lglusterfs $LIBS"
   gfapi="yes"
 fi
 print_config "Gluster API engine" "$gfapi"
@@ -1998,7 +2066,7 @@ EOF
 if compile_prog "" "" "s390_z196_facilities"; then
   $TMPE
   if [ $? -eq 0 ]; then
-  	s390_z196_facilities="yes"
+    s390_z196_facilities="yes"
   fi
 fi
 print_config "s390_z196_facilities" "$s390_z196_facilities"
@@ -2020,7 +2088,7 @@ if test "$libhdfs" = "yes" ; then
     hdfs_conf_error=1
   fi
   if test "$hdfs_conf_error" = "1" ; then
-    exit 1
+    feature_not_found "libhdfs" ""
   fi
   FIO_HDFS_CPU=$cpu
   if test "$FIO_HDFS_CPU" = "x86_64" ; then
@@ -2059,18 +2127,39 @@ if test "$libpmem" != "yes" ; then
 fi
 cat > $TMPC << EOF
 #include <libpmem.h>
+#include <stdlib.h>
 int main(int argc, char **argv)
 {
   int rc;
-  rc = pmem_is_pmem(0, 0);
+  rc = pmem_is_pmem(NULL, 0);
   return 0;
 }
 EOF
 if compile_prog "" "-lpmem" "libpmem"; then
   libpmem="yes"
-  LIBS="-lpmem $LIBS"
 fi
 print_config "libpmem" "$libpmem"
+
+##########################################
+# Check whether libpmem's version >= 1.5
+if test "$libpmem1_5" != "yes" ; then
+  libpmem1_5="no"
+fi
+if test "$libpmem" = "yes"; then
+  cat > $TMPC << EOF
+#include <libpmem.h>
+#include <stdlib.h>
+int main(int argc, char **argv)
+{
+  pmem_memcpy(NULL, NULL, NULL, NULL);
+  return 0;
+}
+EOF
+  if compile_prog "" "-lpmem" "libpmem1_5"; then
+    libpmem1_5="yes"
+  fi
+fi
+print_config "libpmem1_5" "$libpmem1_5"
 
 ##########################################
 # Check whether we have libpmemblk
@@ -2090,15 +2179,16 @@ int main(int argc, char **argv)
 EOF
   if compile_prog "" "-lpmemblk" "libpmemblk"; then
     libpmemblk="yes"
-    LIBS="-lpmemblk $LIBS"
   fi
 fi
 print_config "libpmemblk" "$libpmemblk"
 
-# Choose the ioengines
+# Choose libpmem-based ioengines
 if test "$libpmem" = "yes" && test "$disable_pmem" = "no"; then
-  pmem="yes"
   devdax="yes"
+  if test "$libpmem1_5" = "yes"; then
+    pmem="yes"
+  fi
   if test "$libpmemblk" = "yes"; then
     pmemblk="yes"
   fi
@@ -2140,37 +2230,72 @@ fi
 print_config "DDN's Infinite Memory Engine" "$libime"
 
 ##########################################
-# Check if we have required environment variables configured for libiscsi
-if test "$libiscsi" = "yes" ; then
-  if $(pkg-config --atleast-version=1.9.0 libiscsi); then
+# Check if we have libiscsi
+if test "$libiscsi" != "no" ; then
+  if check_min_lib_version libiscsi 1.9.0; then
     libiscsi="yes"
     libiscsi_cflags=$(pkg-config --cflags libiscsi)
     libiscsi_libs=$(pkg-config --libs libiscsi)
   else
-    if test "$libiscsi" = "yes" ; then
-      echo "libiscsi" "Install libiscsi >= 1.9.0"
-    fi
     libiscsi="no"
   fi
 fi
 print_config "iscsi engine" "$libiscsi"
 
 ##########################################
-# Check if we have libnbd (for NBD support).
-minimum_libnbd=0.9.8
-if test "$libnbd" = "yes" ; then
-  if $(pkg-config --atleast-version=$minimum_libnbd libnbd); then
+# Check if we have libnbd (for NBD support)
+if test "$libnbd" != "no" ; then
+  if check_min_lib_version libnbd 0.9.8; then
     libnbd="yes"
     libnbd_cflags=$(pkg-config --cflags libnbd)
     libnbd_libs=$(pkg-config --libs libnbd)
   else
-    if test "$libnbd" = "yes" ; then
-      echo "libnbd" "Install libnbd >= $minimum_libnbd"
-    fi
     libnbd="no"
   fi
 fi
 print_config "NBD engine" "$libnbd"
+
+##########################################
+# check for dfs (DAOS File System)
+if test "$dfs" != "no" ; then
+  cat > $TMPC << EOF
+#include <fcntl.h>
+#include <daos.h>
+#include <daos_fs.h>
+
+int main(int argc, char **argv)
+{
+  daos_handle_t poh;
+  daos_handle_t coh;
+  dfs_t   *dfs;
+
+  (void) dfs_mount(poh, coh, O_RDWR, &dfs);
+
+  return 0;
+}
+EOF
+  if compile_prog "" "-luuid -ldfs -ldaos" "dfs"; then
+    dfs="yes"
+  else
+    dfs="no"
+  fi
+fi
+print_config "DAOS File System (dfs) Engine" "$dfs"
+
+##########################################
+# Check if we have libnfs (for userspace nfs support).
+if test "$disable_nfs" != "yes"; then
+  if $(pkg-config libnfs > /dev/null 2>&1); then
+    libnfs="yes"
+    libnfs_cflags=$(pkg-config --cflags libnfs)
+    libnfs_libs=$(pkg-config --libs libnfs)
+  else
+    if test "$libnfs" = "yes" ; then
+      echo "libnfs" "Install libnfs"
+    fi
+  fi
+fi
+print_config "NFS engine" "$libnfs"
 
 ##########################################
 # Check if we have lex/yacc available
@@ -2180,19 +2305,14 @@ lex="no"
 arith="no"
 if test "$disable_lex" = "no" || test -z "$disable_lex" ; then
 if test "$targetos" != "SunOS" ; then
-LEX=$(which lex 2> /dev/null)
-if test -x "$LEX" ; then
+if has lex; then
   lex="yes"
 fi
-YACC=$(which bison 2> /dev/null)
-if test -x "$YACC" ; then
+if has bison; then
   yacc="yes"
   yacc_is_bison="yes"
-else
-  YACC=$(which yacc 2> /dev/null)
-  if test -x "$YACC" ; then
-    yacc="yes"
-  fi
+elif has yacc; then
+  yacc="yes"
 fi
 if test "$yacc" = "yes" && test "$lex" = "yes" ; then
   arith="yes"
@@ -2208,7 +2328,9 @@ int main(int argc, char **argv)
   return 0;
 }
 EOF
-if compile_prog "" "-ll" "lex"; then
+if compile_prog "" "-lfl" "flex"; then
+  LIBS="-lfl $LIBS"
+elif compile_prog "" "-ll" "lex"; then
   LIBS="-ll $LIBS"
 else
   arith="no"
@@ -2222,8 +2344,7 @@ if test "$arith" = "yes" ; then
 if test "$force_no_lex_o" = "yes" ; then
   lex_use_o="no"
 else
-$LEX -o lex.yy.c exp/expression-parser.l 2> /dev/null
-if test "$?" = "0" ; then
+if lex -o lex.yy.c exp/expression-parser.l 2> /dev/null; then
   lex_use_o="yes"
 else
   lex_use_o="no"
@@ -2379,6 +2500,7 @@ if compile_prog "" "" "valgrind_dev"; then
 fi
 print_config "Valgrind headers" "$valgrind_dev"
 
+if test "$targetos" = "Linux" ; then
 ##########################################
 # <linux/blkzoned.h> probe
 if test "$linux_blkzoned" != "yes" ; then
@@ -2395,6 +2517,50 @@ if compile_prog "" "" "linux_blkzoned"; then
   linux_blkzoned="yes"
 fi
 print_config "Zoned block device support" "$linux_blkzoned"
+
+##########################################
+# Check BLK_ZONE_REP_CAPACITY
+cat > $TMPC << EOF
+#include <linux/blkzoned.h>
+int main(void)
+{
+  return BLK_ZONE_REP_CAPACITY;
+}
+EOF
+if compile_prog "" "" "blkzoned report capacity"; then
+  output_sym "CONFIG_HAVE_REP_CAPACITY"
+  rep_capacity="yes"
+else
+  rep_capacity="no"
+fi
+print_config "Zoned block device capacity" "$rep_capacity"
+fi
+
+##########################################
+# libzbc probe
+cat > $TMPC << EOF
+#include <libzbc/zbc.h>
+int main(int argc, char **argv)
+{
+  struct zbc_device *dev = NULL;
+
+  return zbc_open("foo=bar", O_RDONLY, &dev);
+}
+EOF
+if test "$libzbc" != "no" ; then
+  if compile_prog "" "-lzbc" "libzbc"; then
+    libzbc="yes"
+    if ! check_min_lib_version libzbc 5; then
+      libzbc="no"
+    fi
+  else
+    if test "$libzbc" = "yes" ; then
+      feature_not_found "libzbc" "libzbc or libzbc/zbc.h"
+    fi
+    libzbc="no"
+  fi
+fi
+print_config "libzbc engine" "$libzbc"
 
 ##########################################
 # check march=armv8-a+crc+crypto
@@ -2427,9 +2593,7 @@ print_config "march_armv8_a_crc_crypto" "$march_armv8_a_crc_crypto"
 
 ##########################################
 # cuda probe
-if test "$cuda" != "yes" ; then
-  cuda="no"
-fi
+if test "$cuda" != "no" ; then
 cat > $TMPC << EOF
 #include <cuda.h>
 int main(int argc, char **argv)
@@ -2437,11 +2601,40 @@ int main(int argc, char **argv)
   return cuInit(0);
 }
 EOF
-if test "$enable_cuda" = "yes" && compile_prog "" "-lcuda" "cuda"; then
-  cuda="yes"
-  LIBS="-lcuda $LIBS"
+  if compile_prog "" "-lcuda" "cuda"; then
+    cuda="yes"
+    LIBS="-lcuda $LIBS"
+  else
+    if test "$cuda" = "yes" ; then
+      feature_not_found "cuda" ""
+    fi
+    cuda="no"
+  fi
 fi
 print_config "cuda" "$cuda"
+
+##########################################
+# libcufile probe
+if test "$libcufile" != "no" ; then
+cat > $TMPC << EOF
+#include <cufile.h>
+
+int main(int argc, char* argv[]) {
+   cuFileDriverOpen();
+   return 0;
+}
+EOF
+  if compile_prog "" "-lcuda -lcudart -lcufile" "libcufile"; then
+    libcufile="yes"
+    LIBS="-lcuda -lcudart -lcufile $LIBS"
+  else
+    if test "$libcufile" = "yes" ; then
+      feature_not_found "libcufile" ""
+    fi
+    libcufile="no"
+  fi
+fi
+print_config "libcufile" "$libcufile"
 
 ##########################################
 # check for cc -march=native
@@ -2499,7 +2692,7 @@ fi
 print_config "__kernel_rwf_t" "$__kernel_rwf_t"
 
 ##########################################
-# check if gcc has -Wimplicit-fallthrough
+# check if gcc has -Wimplicit-fallthrough=2
 fallthrough="no"
 cat > $TMPC << EOF
 int main(int argc, char **argv)
@@ -2507,10 +2700,10 @@ int main(int argc, char **argv)
   return 0;
 }
 EOF
-if compile_prog "-Wimplicit-fallthrough" "" "-Wimplicit-fallthrough"; then
+if compile_prog "-Wimplicit-fallthrough=2" "" "-Wimplicit-fallthrough=2"; then
   fallthrough="yes"
 fi
-print_config "-Wimplicit-fallthrough" "$fallthrough"
+print_config "-Wimplicit-fallthrough=2" "$fallthrough"
 
 ##########################################
 # check for MADV_HUGEPAGE support
@@ -2551,6 +2744,91 @@ if compile_prog "" "" "gettid"; then
 fi
 print_config "gettid" "$gettid"
 
+##########################################
+# check for statx(2) support by libc
+statx="no"
+cat > $TMPC << EOF
+#include <unistd.h>
+#include <sys/stat.h>
+
+int main(int argc, char **argv)
+{
+  struct statx st;
+  return statx(-1, *argv, 0, 0, &st);
+}
+EOF
+if compile_prog "" "" "statx"; then
+  statx="yes"
+fi
+print_config "statx(2)/libc" "$statx"
+
+##########################################
+# check for statx(2) support by kernel
+statx_syscall="no"
+cat > $TMPC << EOF
+#include <unistd.h>
+#include <linux/stat.h>
+#include <sys/stat.h>
+#include <sys/syscall.h>
+
+static int _statx(int dfd, const char *pathname, int flags, unsigned int mask,
+      struct statx *buffer)
+{
+  return syscall(__NR_statx, dfd, pathname, flags, mask, buffer);
+}
+
+int main(int argc, char **argv)
+{
+  struct statx st;
+  return _statx(-1, *argv, 0, 0, &st);
+}
+EOF
+if compile_prog "" "" "statx_syscall"; then
+  statx_syscall="yes"
+fi
+print_config "statx(2)/syscall" "$statx_syscall"
+
+##########################################
+# check for Windows PDB generation support
+if test "pdb" != "no" ; then
+  cat > $TMPC <<EOF
+int main(void)
+{
+  return 0;
+}
+EOF
+  if compile_prog "-g -gcodeview" "-fuse-ld=lld -Wl,-pdb,$TMPO" "pdb"; then
+    pdb=yes
+  else
+    if test "$pdb" = "yes"; then
+      feature_not_found "PDB" "clang and lld"
+    fi
+    pdb=no
+  fi
+else
+  pdb=no
+fi
+print_config "Windows PDB generation" "$pdb"
+
+##########################################
+# check for timerfd support
+timerfd_create="no"
+if test "$esx" != "yes" ; then
+cat > $TMPC << EOF
+#include <sys/time.h>
+#include <sys/timerfd.h>
+
+int main(int argc, char **argv)
+{
+  return timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK);
+}
+EOF
+  if compile_prog "" "" "timerfd_create"; then
+    timerfd_create="yes"
+  fi
+fi
+print_config "timerfd_create" "$timerfd_create"
+
 #############################################################################
 
 if test "$wordsize" = "64" ; then
@@ -2570,8 +2848,8 @@ if test "$zlib" = "yes" ; then
 fi
 if test "$libaio" = "yes" ; then
   output_sym "CONFIG_LIBAIO"
-  if test "$libaio_uring" = "yes" ; then
-    output_sym "CONFIG_LIBAIO_URING"
+  if test "$libaio_rw_flags" = "yes" ; then
+    output_sym "CONFIG_LIBAIO_RW_FLAGS"
   fi
 fi
 if test "$posix_aio" = "yes" ; then
@@ -2588,6 +2866,9 @@ if test "$pthread_condattr_setclock" = "yes" ; then
 fi
 if test "$pthread_sigmask" = "yes" ; then
   output_sym "CONFIG_PTHREAD_SIGMASK"
+fi
+if test "$pthread_getaffinity" = "yes" ; then
+  output_sym "CONFIG_PTHREAD_GETAFFINITY"
 fi
 if test "$have_asprintf" = "yes" ; then
     output_sym "CONFIG_HAVE_ASPRINTF"
@@ -2628,17 +2909,20 @@ fi
 if test "$libverbs" = "yes" -a "$rdmacm" = "yes" ; then
   output_sym "CONFIG_RDMA"
 fi
+# librpma is supported on the 'x86_64' architecture for now
+if test "$cpu" = "x86_64" -a "$libverbs" = "yes" -a "$rdmacm" = "yes" \
+    -a "$librpma" = "yes" -a "$libpmem" = "yes" ; then
+  output_sym "CONFIG_LIBRPMA_APM"
+fi
+if test "$cpu" = "x86_64" -a "$libverbs" = "yes" -a "$rdmacm" = "yes" \
+    -a "$librpma" = "yes" -a "$libpmem" = "yes" -a "$libprotobuf_c" = "yes" ; then
+  output_sym "CONFIG_LIBRPMA_GPSPM"
+fi
 if test "$clock_gettime" = "yes" ; then
   output_sym "CONFIG_CLOCK_GETTIME"
 fi
 if test "$clock_monotonic" = "yes" ; then
   output_sym "CONFIG_CLOCK_MONOTONIC"
-fi
-if test "$clock_monotonic_raw" = "yes" ; then
-  output_sym "CONFIG_CLOCK_MONOTONIC_RAW"
-fi
-if test "$clock_monotonic_precise" = "yes" ; then
-  output_sym "CONFIG_CLOCK_MONOTONIC_PRECISE"
 fi
 if test "$clockid_t" = "yes"; then
   output_sym "CONFIG_CLOCKID_T"
@@ -2677,9 +2961,6 @@ if test "$ext4_me" = "yes" ; then
 fi
 if test "$linux_splice" = "yes" ; then
   output_sym "CONFIG_LINUX_SPLICE"
-fi
-if test "$guasi" = "yes" ; then
-  output_sym "CONFIG_GUASI"
 fi
 if test "$libnuma_v2" = "yes" ; then
   output_sym "CONFIG_LIBNUMA"
@@ -2784,9 +3065,9 @@ fi
 if test "$arith" = "yes" ; then
   output_sym "CONFIG_ARITHMETIC"
   if test "$yacc_is_bison" = "yes" ; then
-    echo "YACC=$YACC -y" >> $config_host_mak
+    echo "YACC=bison -y" >> $config_host_mak
   else
-    echo "YACC=$YACC" >> $config_host_mak
+    echo "YACC=yacc" >> $config_host_mak
   fi
   if test "$lex_use_o" = "yes" ; then
     echo "CONFIG_LEX_USE_O=y" >> $config_host_mak
@@ -2817,7 +3098,10 @@ if test "$valgrind_dev" = "yes"; then
   output_sym "CONFIG_VALGRIND_DEV"
 fi
 if test "$linux_blkzoned" = "yes" ; then
-  output_sym "CONFIG_LINUX_BLKZONED"
+  output_sym "CONFIG_HAS_BLKZONED"
+fi
+if test "$libzbc" = "yes" ; then
+  output_sym "CONFIG_LIBZBC"
 fi
 if test "$zlib" = "no" ; then
   echo "Consider installing zlib-dev (zlib-devel, some fio features depend on it."
@@ -2831,6 +3115,15 @@ fi
 if test "$cuda" = "yes" ; then
   output_sym "CONFIG_CUDA"
 fi
+if test "$libcufile" = "yes" ; then
+  output_sym "CONFIG_LIBCUFILE"
+fi
+if test "$dfs" = "yes" ; then
+  output_sym "CONFIG_DFS"
+fi
+if test "$libnfs" = "yes" ; then
+  output_sym "CONFIG_NFS"
+fi
 if test "$march_set" = "no" && test "$build_native" = "yes" ; then
   output_sym "CONFIG_BUILD_NATIVE"
 fi
@@ -2842,6 +3135,15 @@ if test "$__kernel_rwf_t" = "yes"; then
 fi
 if test "$gettid" = "yes"; then
   output_sym "CONFIG_HAVE_GETTID"
+fi
+if test "$statx" = "yes"; then
+  output_sym "CONFIG_HAVE_STATX"
+fi
+if test "$statx_syscall" = "yes"; then
+  output_sym "CONFIG_HAVE_STATX_SYSCALL"
+fi
+if test "$timerfd_create" = "yes"; then
+  output_sym "CONFIG_HAVE_TIMERFD_CREATE"
 fi
 if test "$fallthrough" = "yes"; then
   CFLAGS="$CFLAGS -Wimplicit-fallthrough"
@@ -2861,17 +3163,36 @@ if test "$libnbd" = "yes" ; then
   echo "LIBNBD_CFLAGS=$libnbd_cflags" >> $config_host_mak
   echo "LIBNBD_LIBS=$libnbd_libs" >> $config_host_mak
 fi
+if test "$libnfs" = "yes" ; then
+  output_sym "CONFIG_LIBNFS"
+  echo "CONFIG_LIBNFS=m" >> $config_host_mak
+  echo "LIBNFS_CFLAGS=$libnfs_cflags" >> $config_host_mak
+  echo "LIBNFS_LIBS=$libnfs_libs" >> $config_host_mak
+fi
+if test "$dynamic_engines" = "yes" ; then
+  output_sym "CONFIG_DYNAMIC_ENGINES"
+fi
+if test "$pdb" = yes; then
+  output_sym "CONFIG_PDB"
+fi
+
+print_config "Lib-based ioengines dynamic" "$dynamic_engines"
 cat > $TMPC << EOF
 int main(int argc, char **argv)
 {
   return 0;
 }
 EOF
-if test "$disable_tcmalloc" != "yes"  && compile_prog "" "-ltcmalloc" "tcmalloc"; then
-  LIBS="-ltcmalloc $LIBS"
-  tcmalloc="yes"
-else
-  tcmalloc="no"
+if test "$disable_tcmalloc" != "yes"; then
+  if compile_prog "" "-ltcmalloc" "tcmalloc"; then
+    tcmalloc="yes"
+    LIBS="-ltcmalloc $LIBS"
+  elif compile_prog "" "-l:libtcmalloc_minimal.so.4" "tcmalloc_minimal4"; then
+    tcmalloc="yes"
+    LIBS="-l:libtcmalloc_minimal.so.4 $LIBS"
+  else
+    tcmalloc="no"
+  fi
 fi
 print_config "TCMalloc support" "$tcmalloc"
 

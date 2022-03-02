@@ -58,6 +58,12 @@
 #define MAP_HUGETLB 0x40000 /* arch specific */
 #endif
 
+#ifdef CONFIG_PTHREAD_GETAFFINITY
+#define FIO_HAVE_GET_THREAD_AFFINITY
+#define fio_get_thread_affinity(mask)	\
+	pthread_getaffinity_np(pthread_self(), sizeof(mask), &(mask))
+#endif
+
 #ifndef CONFIG_NO_SHM
 /*
  * Bionic doesn't support SysV shared memeory, so implement it using ashmem
@@ -65,10 +71,14 @@
 #include <stdio.h>
 #include <linux/ashmem.h>
 #include <linux/shm.h>
+#include <android/api-level.h>
+#if __ANDROID_API__ >= __ANDROID_API_O__
+#include <android/sharedmem.h>
+#else
+#define ASHMEM_DEVICE	"/dev/ashmem"
+#endif
 #define shmid_ds shmid64_ds
 #define SHM_HUGETLB    04000
-
-#define ASHMEM_DEVICE	"/dev/ashmem"
 
 static inline int shmctl(int __shmid, int __cmd, struct shmid_ds *__buf)
 {
@@ -83,6 +93,16 @@ static inline int shmctl(int __shmid, int __cmd, struct shmid_ds *__buf)
 	return ret;
 }
 
+#if __ANDROID_API__ >= __ANDROID_API_O__
+static inline int shmget(key_t __key, size_t __size, int __shmflg)
+{
+	char keybuf[11];
+
+	sprintf(keybuf, "%d", __key);
+
+	return ASharedMemory_create(keybuf, __size + sizeof(uint64_t));
+}
+#else
 static inline int shmget(key_t __key, size_t __size, int __shmflg)
 {
 	int fd,ret;
@@ -108,6 +128,7 @@ error:
 	close(fd);
 	return ret;
 }
+#endif
 
 static inline void *shmat(int __shmid, const void *__shmaddr, int __shmflg)
 {
@@ -152,16 +173,26 @@ enum {
 #define IOPRIO_MIN_PRIO_CLASS	0
 #define IOPRIO_MAX_PRIO_CLASS	3
 
-static inline int ioprio_set(int which, int who, int ioprio_class, int ioprio)
+static inline int ioprio_value(int ioprio_class, int ioprio)
 {
 	/*
 	 * If no class is set, assume BE
 	 */
-	if (!ioprio_class)
-		ioprio_class = IOPRIO_CLASS_BE;
+        if (!ioprio_class)
+                ioprio_class = IOPRIO_CLASS_BE;
 
-	ioprio |= ioprio_class << IOPRIO_CLASS_SHIFT;
-	return syscall(__NR_ioprio_set, which, who, ioprio);
+	return (ioprio_class << IOPRIO_CLASS_SHIFT) | ioprio;
+}
+
+static inline bool ioprio_value_is_class_rt(unsigned int priority)
+{
+	return (priority >> IOPRIO_CLASS_SHIFT) == IOPRIO_CLASS_RT;
+}
+
+static inline int ioprio_set(int which, int who, int ioprio_class, int ioprio)
+{
+	return syscall(__NR_ioprio_set, which, who,
+		       ioprio_value(ioprio_class, ioprio));
 }
 
 #ifndef BLKGETSIZE64
@@ -276,6 +307,10 @@ static inline int fio_set_sched_idle(void)
         struct sched_param p = { .sched_priority = 0, };
         return sched_setscheduler(gettid(), SCHED_IDLE, &p);
 }
+#endif
+
+#ifndef RWF_UNCACHED
+#define RWF_UNCACHED	0x00000040
 #endif
 
 #endif

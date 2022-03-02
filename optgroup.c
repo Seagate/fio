@@ -142,6 +142,10 @@ static const struct opt_group fio_opt_cat_groups[] = {
 		.mask	= FIO_OPT_G_RDMA,
 	},
 	{
+		.name	= "librpma I/O engines", /* librpma_apm && librpma_gpspm */
+		.mask	= FIO_OPT_G_LIBRPMA,
+	},
+	{
 		.name	= "libaio I/O engine", /* libaio */
 		.mask	= FIO_OPT_G_LIBAIO,
 	},
@@ -172,6 +176,18 @@ static const struct opt_group fio_opt_cat_groups[] = {
 	{
 		.name	= "NBD I/O engine", /* NBD */
 		.mask	= FIO_OPT_G_NBD,
+	},
+	{
+		.name	= "libcufile I/O engine", /* libcufile */
+		.mask	= FIO_OPT_G_LIBCUFILE,
+	},
+	{
+		.name	= "DAOS File System (dfs) I/O engine", /* dfs */
+		.mask	= FIO_OPT_G_DFS,
+	},
+	{
+		.name	= "NFS I/O engine", /* nfs */
+		.mask	= FIO_OPT_G_NFS,
 	},
 	{
 		.name	= NULL,

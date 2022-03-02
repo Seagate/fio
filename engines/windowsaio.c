@@ -106,11 +106,10 @@ static int fio_windowsaio_init(struct thread_data *td)
 			ctx->iocp = hFile;
 			ctx->wd = wd;
 			wd->iothread = CreateThread(NULL, 0, IoCompletionRoutine, ctx, 0, &threadid);
-
-			if (wd->iothread != NULL)
-				fio_setaffinity(threadid, td->o.cpumask);
-			else
+			if (!wd->iothread)
 				log_err("windowsaio: failed to create io completion thread\n");
+			else if (fio_option_is_set(&td->o, cpumask))
+				fio_setaffinity(threadid, td->o.cpumask);
 		}
 
 		if (rc || wd->iothread == NULL)
@@ -162,15 +161,15 @@ static int windowsaio_invalidate_cache(struct fio_file *f)
 	if (ihFile != INVALID_HANDLE_VALUE) {
 		if (!CloseHandle(ihFile)) {
 			error = GetLastError();
-			log_info("windowsaio: invalidation fd close %s "
-				 "failed: error %d\n", f->file_name, error);
+			log_info("windowsaio: invalidation fd close %s failed: error %lu\n",
+				 f->file_name, error);
 			rc = 1;
 		}
 	} else {
 		error = GetLastError();
 		if (error != ERROR_FILE_NOT_FOUND) {
-			log_info("windowsaio: cache invalidation of %s failed: "
-					"error %d\n", f->file_name, error);
+			log_info("windowsaio: cache invalidation of %s failed: error %lu\n",
+				 f->file_name, error);
 			rc = 1;
 		}
 	}
