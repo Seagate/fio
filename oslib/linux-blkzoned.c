@@ -132,9 +132,8 @@ int blkzoned_get_zoned_model(struct thread_data *td, struct fio_file *f,
 		fd = open(f->file_name, O_RDONLY | O_LARGEFILE);
 		// This may not succeed, but if it doesn't it's definitely not a FLEX drive
 		sg_get_flex_zd(fd, &flex_drive);
-		// Treat FLEX/zone domains drives like host managed
 		if (flex_drive)
-			*model = ZBD_HOST_MANAGED;
+			*model = ZBD_ZONE_DOMAINS;
 		close(fd);
 	}
 

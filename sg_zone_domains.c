@@ -134,8 +134,7 @@ int sg_reset_zones(int fd, struct blk_zone_range* zr,
     uint64_t cur_lba, last_lba;
     int ret = 0;
 
-    dprint(FD_ZBD, "Entered sg_reset_zones with use_scsi = %d\n", use_scsi);
-    cur_lba = zr->nr_sectors;
+    cur_lba = zr->sector;
     last_lba = cur_lba + zr->nr_sectors;
 
     if (use_scsi) {

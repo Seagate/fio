@@ -17,6 +17,7 @@ enum zbd_zoned_model {
 	ZBD_NONE		= 0x1,	/* No zone support. Emulate zones. */
 	ZBD_HOST_AWARE		= 0x2,	/* Host-aware zoned block device */
 	ZBD_HOST_MANAGED	= 0x3,	/* Host-managed zoned block device */
+        ZBD_ZONE_DOMAINS        = 0x4,  /* Likely to contain host managed zones block device */
 };
 
 /*
