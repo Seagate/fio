@@ -92,12 +92,15 @@ struct zoned_block_device_info {
 	uint64_t		wp_sectors_with_data;
 	uint32_t		zone_size_log2;
 	uint32_t		nr_zones;
+	uint32_t		nr_online_zones;
+	uint32_t		nr_offline_zones;
 	uint32_t		refcount;
 	uint32_t		num_open_zones;
 	int		use_sg;
 	uint32_t		block_size;
 	uint32_t		write_cnt;
 	uint32_t		open_zones[ZBD_MAX_OPEN_ZONES];
+	struct fio_zone_info**	online_zone_info;
 	struct fio_zone_info	zone_info[0];
 };
 

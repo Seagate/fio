@@ -750,7 +750,7 @@ static int init_zone_info(struct thread_data *td, struct fio_file *f)
  */
 static int parse_zone_info(struct thread_data *td, struct fio_file *f, bool allow_queue_in_zones)
 {
-	int nr_zones, nrz;
+	int nr_zones, nrz, online_zone_ind, offline_zone_ind, seq_info;
 	struct zbd_zone *zones, *z;
 	struct fio_zone_info *p;
 	uint64_t zone_size, offset, next_online_offset;
@@ -796,6 +796,7 @@ static int parse_zone_info(struct thread_data *td, struct fio_file *f, bool allo
 	zbd_info->refcount = 1;
 	zbd_info->use_sg = use_sg_rz;
 	zbd_info->block_size = block_size;
+	zbd_info->nr_online_zones = 0;
 	f->zbd_info = zbd_info;
 	p = &zbd_info->zone_info[0];
 	for (offset = 0, j = 0; j < nr_zones;) {
@@ -844,6 +845,9 @@ static int parse_zone_info(struct thread_data *td, struct fio_file *f, bool allo
 				p->cond = ZBD_ZONE_COND_NOT_WP;
 				p->wp = p->start + p->capacity;
 			}
+			// Track online zones
+			if (p->cond != ZBD_ZONE_COND_OFFLINE)
+				zbd_info->nr_online_zones++;
 
 			if (j > 0 && p->start != p[-1].start + zone_size) {
 				log_info("%s: invalid zone data for zone %d, starts at %lu, expected %lu + %lu (%lu), len = %lu\n",
@@ -878,20 +882,43 @@ static int parse_zone_info(struct thread_data *td, struct fio_file *f, bool allo
 
 	/* a sentinel */
 	zbd_info->zone_info[nr_zones].start = offset;
+	// Calculate this here so it doesn't have to be calculated
+	// every time a random I/O hits an offline zone
+	zbd_info->nr_offline_zones = nr_zones - zbd_info->nr_online_zones;
 
-	/* Set offline write pointers to next online zone start
-	 * for sequential skips -- not sure how reverse
-	 * sequentials should work */
+	/* Create array of pointers to online zones */
+	zbd_info->online_zone_info = scalloc(zbd_info->nr_online_zones, sizeof(p));
 	next_online_offset = f->file_offset;
-	for (int zone_ind = nr_zones - 1; zone_ind >= 0; zone_ind--) {
+	online_zone_ind = zbd_info->nr_online_zones;
+	offline_zone_ind = zbd_info->nr_offline_zones;
+	seq_info = false;
+	for (int zone_ind = nr_zones - 1;
+		zone_ind >= 0; zone_ind--) {
 		p = &zbd_info->zone_info[zone_ind];
-		if (p->cond != ZBD_ZONE_COND_OFFLINE)
+		/* Alternate between setting offline write pointers
+		 * to offline index and next online zone start
+		 * for sequential skips -- not sure how reverse
+		 * sequentials should work */
+		if (p->cond == ZBD_ZONE_COND_OFFLINE) {
+			p->reset_zone = seq_info;
+			offline_zone_ind--;
+			assert(offline_zone_ind >= 0);
+			if (seq_info) {
+				seq_info = false;
+				p->wp = next_online_offset;
+			} else {
+				seq_info = true;
+				p->wp = offline_zone_ind;
+			}
+		} else {
+			online_zone_ind--;
+			assert(online_zone_ind >= 0);
+			zbd_info->online_zone_info[online_zone_ind] = p;
 			next_online_offset = p->start;
-		else
-			p->wp = next_online_offset;
+			seq_info = false;
+		}
 	}
 
-	// f->zbd_info = zbd_info;
 	f->zbd_info->zone_size = zone_size;
 	f->zbd_info->zone_size_log2 = is_power_of_2(zone_size) ?
 		ilog2(zone_size) : 0;
@@ -1332,6 +1359,7 @@ static bool any_io_in_flight(void)
  * a multiple of the fio block size. The caller must neither hold z->mutex
  * nor f->zbd_info->mutex. Returns with z->mutex held upon success.
  */
+// This function seems like it could be simplified significantly
 static struct fio_zone_info *zbd_convert_to_open_zone(struct thread_data *td,
 							  struct io_u *io_u)
 {
@@ -1381,6 +1409,8 @@ static struct fio_zone_info *zbd_convert_to_open_zone(struct thread_data *td,
 
 		pthread_mutex_lock(&zbdi->mutex);
 
+		// This seems to check whether the zone_idx was initialized yet by seeing if it points to
+		// a wp zone, which wouldn't work on some configurations like 100% SMR
 		if (z->has_wp) {
 			if (z->cond != ZBD_ZONE_COND_OFFLINE &&
 				zbdi->max_open_zones == 0 &&
@@ -1392,6 +1422,8 @@ static struct fio_zone_info *zbd_convert_to_open_zone(struct thread_data *td,
 				goto open_other_zone;
 			}
 		}
+		// Not sure why this function even continues. Surely it's illegal
+		// or at least nonsensical to try to open a non-wp zone?
 
 		/*
 		 * List of opened zones is per-device, shared across all
@@ -1613,8 +1645,6 @@ zbd_find_zone(struct thread_data *td, struct io_u *io_u, uint64_t min_bytes,
 				return z1;
 			if (z1->has_wp)
 				zone_unlock(z1);
-		} else if (!td_random(td)) {
-			break;
 		}
 
 		if (td_random(td) && z2 >= zf &&
@@ -1891,6 +1921,39 @@ enum io_u_action zbd_adjust_block(struct thread_data *td, struct io_u *io_u)
 
 	zb = zbd_offset_to_zone(f, io_u->offset);
 	orig_zb = zb;
+
+	// Find a suitable online zone if necessary
+	if (zb->cond == ZBD_ZONE_COND_OFFLINE) {
+		// Offline zones should have their reset_zone field set to
+		// 1 for sequential info and 0 for random info in parse_zone_info.
+		// So if td_random is equal to the reset_zone field, iterate to
+		// next zone
+		if ((td_random(td) > 0) == zb->reset_zone)
+			zb++;
+		// This should only happen for sequential I/O
+		if (zb->cond != ZBD_ZONE_COND_OFFLINE) {
+			assert(!td_random(td));
+			io_u->offset = zb->start;
+		}
+		else if (td_random(td)) {
+			assert(zb->reset_zone == 0);
+			if (zb == orig_zb)
+				new_len = (zb->wp * zbdi->nr_online_zones) / zbdi->nr_offline_zones;
+			else
+				new_len = ((zb->wp - 1) * zbdi->nr_online_zones) / zbdi->nr_offline_zones;
+			// Since the wp contains the offline zone ind, can map
+			// to an online zone ind using zbd_info.
+			zb = zbdi->online_zone_info[new_len];
+			// Now set the io offset to the same offset relative
+			// the start as the originating offset
+			io_u->offset = zb->start + (io_u->offset % zbdi->zone_size);
+		} else {
+			// The wp contains the next online zone offset so set
+			// zb to that
+			zb = zbd_offset_to_zone(f, zb->wp);
+			io_u->offset = zb->start;
+		}
+	}
 
 	/* If this is a filled FLEX zone, treat it like a conventional
 	 * from now on.
