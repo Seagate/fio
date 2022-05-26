@@ -739,10 +739,6 @@ static int init_zone_info(struct thread_data *td, struct fio_file *f)
 	return 0;
 }
 
-/*
- * Maximum number of zones to report in one operation.
- */
-#define ZBD_REPORT_MAX_ZONES	8192U
 
 /*
  * Parse the device zone report and store it in f->zbd_info. Must be called
@@ -1148,13 +1144,46 @@ int zbd_setup_files(struct thread_data *td)
 	for_each_file(td, f, i) {
 		struct zoned_block_device_info *zbd = f->zbd_info;
 		struct fio_zone_info *z;
-		int zi;
+		int zi, on_zi, off_zi;
 
 		assert(zbd);
 
 		f->min_zone = zbd_offset_to_zone_idx(f, f->file_offset);
 		f->max_zone =
 			zbd_offset_to_zone_idx(f, f->file_offset + f->io_size);
+		// Find the range of online and offline zones for this file for easy random remapping
+		f->min_online_zone = -1;
+		f->min_offline_zone = -1;
+		f->max_online_zone = zbd->nr_online_zones;
+		f->max_offline_zone = zbd->nr_offline_zones;
+		for (zi = 0, on_zi = 0, off_zi = 0; zi < zbd->nr_zones; zi++) {
+			if (zbd->zone_info[zi].cond != ZBD_ZONE_COND_OFFLINE) {
+				if (f->min_online_zone == -1 &&
+						zbd->zone_info[zi].start >= zbd->zone_info[f->min_zone].start &&
+						zbd->zone_info[zi].start < zbd->zone_info[f->max_zone].start) {
+					f->min_online_zone = on_zi;
+				}
+				if (f->min_online_zone != -1 && f->max_online_zone == zbd->nr_online_zones &&
+						zbd->zone_info[zi].start >= zbd->zone_info[f->max_zone].start) {
+					f->max_online_zone = on_zi;
+				}
+				on_zi++;
+			} else {
+				if (f->min_offline_zone == -1 &&
+						zbd->zone_info[zi].start >= zbd->zone_info[f->min_zone].start &&
+						zbd->zone_info[zi].start < zbd->zone_info[f->max_zone].start) {
+					f->min_offline_zone = off_zi;
+				}
+				if (f->min_offline_zone != -1 && f->max_offline_zone == zbd->nr_offline_zones &&
+						zbd->zone_info[zi].start >= zbd->zone_info[f->max_zone].start) {
+					f->max_offline_zone = off_zi;
+				}
+				off_zi++;
+			}
+			if (f->max_online_zone != zbd->nr_online_zones &&
+					f->max_offline_zone != zbd->nr_offline_zones)
+				break;
+		}
 
 		/*
 		 * When all zones in the I/O range are conventional, io_size
@@ -1201,7 +1230,7 @@ int zbd_setup_files(struct thread_data *td)
 			 * reset all extra open zones.
 			 */
 			if (zbd_reset_zone(td, f, z) < 0) {
-				log_err("Failed to reest zone %d\n", zi);
+				log_err("Failed to reset zone %d\n", zi);
 				return 1;
 			}
 		}
@@ -1893,6 +1922,39 @@ enum fio_ddir zbd_adjust_ddir(struct thread_data *td, struct io_u *io_u,
 
 	return DDIR_WRITE;
 }
+/**
+ * zbd_remap_offline_zone - map a offset from an offline zone to a known online zone
+ * @f: FIO file struct
+ * @offline_ind: Index of the offline zone
+ * @zone_offset: Byte offset into the offline zone, e.g. io_u->offset - zone_start
+ *
+ * Uses the number of offline and online zones in a file to translate offline zones
+ * to a corresponding online zone in the file's range such that
+ * online_ind = offline_ind * nr_online_zones / nr_offline_zones.
+ * Since this can lead to an undesirably discrete translation for large numbers of
+ * of online zones compared to offline zones, the offset into the offline zone is
+ * used to smooth this distribution such that an offset halfway through the second
+ * offline zone has an "index" of 1.5
+ */
+static uint64_t zbd_remap_offline_zone(struct fio_file *f, uint32_t offline_ind,
+			uint64_t zone_offset) {
+	uint64_t ret_var;
+	uint64_t zone_size;
+	struct zoned_block_device_info *zbdi = f->zbd_info;
+	// Round down to nearest sector to reduce overflow problems
+	zone_offset = zone_offset >> 9;
+	zone_size = zbdi->zone_size >> 9;
+
+	// Calculate the file specific online index truncated with integer math
+	// This shouldn't overflow, since the zone index should only be around 10 bits and the
+	// zone size should be 11 bits (after the above reduction) leaving a numerator of 31 bits,
+	// but this is not guaranteed if drives with orders of magnitudes more zones are created
+	ret_var = (((f->max_online_zone - f->min_online_zone) * (
+		(offline_ind - f->min_offline_zone) * zone_size + zone_offset)) /
+		(zone_size * (f->max_offline_zone - f->min_offline_zone)));
+
+	return ret_var;
+}
 
 /**
  * zbd_adjust_block - adjust the offset and length as necessary for ZBD drives
@@ -1936,25 +1998,43 @@ enum io_u_action zbd_adjust_block(struct thread_data *td, struct io_u *io_u)
 			io_u->offset = zb->start;
 		}
 		else if (td_random(td)) {
+			// If there are no online zones for this file, move to eof
+			if (f->min_online_zone == -1 || f->min_online_zone == f->max_online_zone) {
+				dprint(FD_ZBD, "No online zones for this file, handling as EOF\n");
+				goto eof;
+			}
+			// If there's no offline zones on the file, the initial offset shouldn't be pointing
+			// at an offline zone
+			assert(f->min_offline_zone != -1 && f->min_offline_zone != f->max_offline_zone);
+			// Earlier handling should have moved this to point at a zone with random data in the wp
 			assert(zb->reset_zone == 0);
+			// Calculate online zone index and store it in new_len variable
 			if (zb == orig_zb)
-				new_len = (zb->wp * zbdi->nr_online_zones) / zbdi->nr_offline_zones;
+				new_len = zbd_remap_offline_zone(f, zb->wp, io_u->offset % zbdi->zone_size);
 			else
-				new_len = ((zb->wp - 1) * zbdi->nr_online_zones) / zbdi->nr_offline_zones;
+				new_len = zbd_remap_offline_zone(f, zb->wp - 1, io_u->offset % zbdi->zone_size);
 			// Since the wp contains the offline zone ind, can map
 			// to an online zone ind using zbd_info.
 			zb = zbdi->online_zone_info[new_len];
 			// Now set the io offset to the same offset relative
 			// the start as the originating offset
+			dprint(FD_ZBD, "Moving random offline offset from 0x%llX to 0x%llX. is_read = %d, "
+				"new zone's has_wp = %d, start = 0x%lX, cond = %d, zone_ind = %ld, "
+				"nr_online_zones = %d\n",
+				io_u->offset, zb->start + (io_u->offset % zbdi->zone_size), io_u->ddir == DDIR_READ,
+				zb->has_wp, zb->start, zb->cond, new_len, zbdi->nr_online_zones);
 			io_u->offset = zb->start + (io_u->offset % zbdi->zone_size);
 		} else {
 			// The wp contains the next online zone offset so set
 			// zb to that
 			zb = zbd_offset_to_zone(f, zb->wp);
+			dprint(FD_ZBD, "Moving sequential offline offset from 0x%llX to 0x%lX.\n",
+				io_u->offset, zb->start);
+			if (zb - zbdi->zone_info >= f->min_zone)
+				goto eof;
 			io_u->offset = zb->start;
 		}
 	}
-
 	/* If this is a filled FLEX zone, treat it like a conventional
 	 * from now on.
 	 */
@@ -2205,7 +2285,6 @@ accept:
 	 * is intentional.
 	 */
 	/* coverity[missing_unlock] */
-
 	return io_u_accept;
 
 eof:

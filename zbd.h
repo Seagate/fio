@@ -15,6 +15,11 @@
 struct fio_file;
 
 /*
+ * Maximum number of zones to report in one operation.
+ */
+#define ZBD_REPORT_MAX_ZONES	8192U
+
+/*
  * Zoned block device models.
  */
 enum blk_zoned_model {

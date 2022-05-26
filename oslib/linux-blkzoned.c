@@ -208,7 +208,7 @@ int blkzoned_report_zones(struct thread_data *td, struct fio_file *f,
 		// sg_report_zones uses 64 bytes for the header and 64 bytes for each zone
 		bufsz = 64 + nr_zones * 64;
 		// sg_report_zones can only return full blocks, so round up to the nearest block, resulting
-		// in more than the requested number of zones
+		// in more than the requested number of zones, unless this would overrun our buffer
 		// Assume block size of 512 if unknown
 		if (*block_size == 0) {
 			guessed_block_size = true;
@@ -217,10 +217,14 @@ int blkzoned_report_zones(struct thread_data *td, struct fio_file *f,
 
 		if (bufsz % *block_size != 0)
 			bufsz += *block_size - (bufsz % *block_size);
+		if ((bufsz - 64) / 64 > ZBD_REPORT_MAX_ZONES )
+			bufsz -= *block_size;
 		if (guessed_block_size)
 			*block_size = 0;
-		hdr = calloc(1, bufsz);
+		hdr = realloc(hdr, bufsz);
 		if (!hdr) {
+			dprint(FD_ZBD, "%s: Realloc returned NULL in blkzoned_report_zones after trying to "
+				"allocate %d bytes\n", f->file_name, bufsz);
 			ret = -ENOMEM;
 			goto out;
 		}
