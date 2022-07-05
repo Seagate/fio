@@ -1996,13 +1996,11 @@ enum io_u_action zbd_adjust_block(struct thread_data *td, struct io_u *io_u)
 		if (zb->cond != ZBD_ZONE_COND_OFFLINE) {
 			assert(!td_random(td));
 			io_u->offset = zb->start;
-		}
-		else if (td_random(td)) {
-			// If there are no online zones for this file, move to eof
-			if (f->min_online_zone == -1 || f->min_online_zone == f->max_online_zone) {
-				dprint(FD_ZBD, "No online zones for this file, handling as EOF\n");
-				goto eof;
-			}
+		// If there are no online zones for this file, move to eof
+		} else if (f->min_online_zone == -1 || f->min_online_zone == f->max_online_zone) {
+			dprint(FD_ZBD, "No online zones for this file, handling as EOF\n");
+			goto eof;
+		} else if (td_random(td)) {
 			// If there's no offline zones on the file, the initial offset shouldn't be pointing
 			// at an offline zone
 			assert(f->min_offline_zone != -1 && f->min_offline_zone != f->max_offline_zone);
