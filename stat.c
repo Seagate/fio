@@ -418,6 +418,8 @@ static void stat_calc_lat_nu(struct thread_stat *ts, double *io_u_lat_u)
 	int i;
 
 	stat_calc_lat(ts, io_u_lat_u, ts->io_u_lat_u, FIO_IO_U_LAT_U_NR);
+	if (total <= 0)
+		return;
 
 	for (i = 0; i < FIO_IO_U_LAT_N_NR; i++)
 		ntotal += ts->io_u_lat_n[i];
