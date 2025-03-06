@@ -11,6 +11,7 @@
 #include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <math.h>
 
 #include "file.h"
 #include "fio.h"
@@ -20,6 +21,8 @@
 #include "smalloc.h"
 #include "verify.h"
 #include "zbd_types.h"
+#include "sg_zone_domains.h"
+#include "zbd.h"
 
 #include <linux/blkzoned.h>
 #ifndef BLKFINISHZONE
@@ -157,6 +160,17 @@ int blkzoned_get_zoned_model(struct thread_data *td, struct fio_file *f,
 		*model = ZBD_HOST_AWARE;
 	else if (strcmp(model_str, "host-managed") == 0)
 		*model = ZBD_HOST_MANAGED;
+	else {
+		bool flex_drive = false;
+		int fd = -1;
+		// Check whether drive is FLEX/zone domains drive
+		fd = open(f->file_name, O_RDONLY | O_LARGEFILE);
+		// This may not succeed, but if it doesn't it's definitely not a FLEX drive
+		sg_get_flex_zd(fd, &flex_drive);
+		if (flex_drive)
+			*model = ZBD_ZONE_DOMAINS;
+		close(fd);
+	}
 
 	free(model_str);
 
@@ -219,28 +233,61 @@ static uint64_t zone_capacity(struct blk_zone_report *hdr,
 
 int blkzoned_report_zones(struct thread_data *td, struct fio_file *f,
 			  uint64_t offset, struct zbd_zone *zones,
-			  unsigned int nr_zones)
+			  unsigned int nr_zones, int *use_sg_rz, uint32_t *block_size)
 {
 	struct blk_zone_report *hdr = NULL;
 	struct blk_zone *blkz;
 	struct zbd_zone *z;
 	unsigned int i;
 	int fd = -1, ret;
+	unsigned int bufsz;
+	int lba_power = 9;
 
 	fd = open(f->file_name, O_RDONLY | O_LARGEFILE);
 	if (fd < 0)
 		return -errno;
 
-	hdr = calloc(1, sizeof(struct blk_zone_report) +
-			nr_zones * sizeof(struct blk_zone));
+	bufsz = sizeof(struct blk_zone_report) + nr_zones * sizeof(struct blk_zone);
+	hdr = calloc(1, bufsz);
 	if (!hdr) {
 		ret = -ENOMEM;
 		goto out;
 	}
 
-	hdr->nr_zones = nr_zones;
-	hdr->sector = offset >> 9;
-	ret = ioctl(fd, BLKREPORTZONE, hdr);
+	if (*use_sg_rz <= sg_zd_uninitialized) {
+		hdr->nr_zones = nr_zones;
+		hdr->sector = offset >> lba_power;
+		ret = ioctl(fd, BLKREPORTZONE, hdr);
+	}
+	// Get zones using sg_report_zones
+	// TODO: Check this failed for the right reason
+	if (*use_sg_rz > sg_zd_uninitialized || (ret < 0 && *use_sg_rz > sg_zd_do_not_use)) {
+		bool guessed_block_size = false;
+		// sg_report_zones uses 64 bytes for the header and 64 bytes for each zone
+		bufsz = 64 + nr_zones * 64;
+		// sg_report_zones can only return full blocks, so round up to the nearest block, resulting
+		// in more than the requested number of zones, unless this would overrun our buffer
+		// Assume block size of 512 if unknown
+		if (*block_size == 0) {
+			guessed_block_size = true;
+			*block_size = 512;
+		}
+
+		if (bufsz % *block_size != 0)
+			bufsz += *block_size - (bufsz % *block_size);
+		if ((bufsz - 64) / 64 > ZBD_REPORT_MAX_ZONES )
+			bufsz -= *block_size;
+		if (guessed_block_size)
+			*block_size = 0;
+		hdr = realloc(hdr, bufsz);
+		if (!hdr) {
+			dprint(FD_ZBD, "%s: Realloc returned NULL in blkzoned_report_zones after trying to "
+				"allocate %d bytes\n", f->file_name, bufsz);
+			ret = -ENOMEM;
+			goto out;
+		}
+		ret = sg_read_zone_info(fd, offset, use_sg_rz, block_size, hdr, bufsz);
+	}
 	if (ret) {
 		log_err("%s: BLKREPORTZONE ioctl failed, ret=%d, err=%d.\n",
 			f->file_name, ret, -errno);
@@ -248,13 +295,15 @@ int blkzoned_report_zones(struct thread_data *td, struct fio_file *f,
 		goto out;
 	}
 
+	if (*block_size != 0)
+		lba_power = log2(*block_size);
 	nr_zones = hdr->nr_zones;
 	blkz = (void *) hdr + sizeof(*hdr);
 	z = &zones[0];
 	for (i = 0; i < nr_zones; i++, z++, blkz++) {
-		z->start = blkz->start << 9;
-		z->wp = blkz->wp << 9;
-		z->len = blkz->len << 9;
+		z->start = blkz->start << lba_power;
+		z->wp = blkz->wp << lba_power;
+		z->len = blkz->len << lba_power;
 		z->capacity = zone_capacity(hdr, blkz);
 
 		switch (blkz->type) {
@@ -267,7 +316,11 @@ int blkzoned_report_zones(struct thread_data *td, struct fio_file *f,
 		case BLK_ZONE_TYPE_SEQWRITE_PREF:
 			z->type = ZBD_ZONE_TYPE_SWP;
 			break;
+		case ZBD_ZONE_TYPE_FLEX:
+			z->type = ZBD_ZONE_TYPE_FLEX;
+			break;
 		default:
+			dprint(FD_ZBD, "Encountered unknown zone type %d\n", blkz->type);
 			td_verror(td, errno, "invalid zone type");
 			log_err("%s: invalid type for zone at sector %llu.\n",
 				f->file_name, (unsigned long long)offset >> 9);
@@ -289,6 +342,7 @@ int blkzoned_report_zones(struct thread_data *td, struct fio_file *f,
 			z->cond = ZBD_ZONE_COND_EXP_OPEN;
 			break;
 		case BLK_ZONE_COND_CLOSED:
+		// case BLK_ZONE_COND_INACTIVE:
 			z->cond = ZBD_ZONE_COND_CLOSED;
 			break;
 		case BLK_ZONE_COND_FULL:
@@ -307,16 +361,16 @@ int blkzoned_report_zones(struct thread_data *td, struct fio_file *f,
 out:
 	free(hdr);
 	close(fd);
-
 	return ret;
 }
 
 int blkzoned_reset_wp(struct thread_data *td, struct fio_file *f,
 		      uint64_t offset, uint64_t length)
 {
+	int lba_power = 9;
 	struct blk_zone_range zr = {
-		.sector         = offset >> 9,
-		.nr_sectors     = length >> 9,
+		.sector         = offset >> lba_power,
+		.nr_sectors     = length >> lba_power,
 	};
 	int fd, ret = 0;
 
@@ -328,7 +382,14 @@ int blkzoned_reset_wp(struct thread_data *td, struct fio_file *f,
 			return -errno;
 	}
 
-	if (ioctl(fd, BLKRESETZONE, &zr) < 0)
+	ret = ioctl(fd, BLKRESETZONE, &zr);
+	if (ret < 0) {
+		lba_power = log2(f->zbd_info->block_size);
+		zr.sector = offset >> lba_power;
+		zr.nr_sectors = length >> lba_power;
+		ret = sg_reset_zones(fd, &zr, f->zbd_info->zone_size >> lba_power, f->zbd_info->use_sg == sg_zd_use_scsi);
+	}
+	if (ret < 0)
 		ret = -errno;
 
 	if (f->fd < 0)

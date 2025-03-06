@@ -1388,7 +1388,7 @@ I/O type
 	spacing between the starting points. Percentages can be used for this option.
 	If a percentage is given, the generated offset will be aligned to the minimum
 	``blocksize`` or to the value of ``offset_align`` if provided. In ZBD mode, value can
-        also be set as number of zones using 'z'.
+	also be set as number of zones using 'z'.
 
 .. option:: number_ios=int
 

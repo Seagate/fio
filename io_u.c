@@ -1015,7 +1015,10 @@ static int fill_io_u(struct thread_data *td, struct io_u *io_u)
 	bool is_random;
 	uint64_t offset;
 	enum io_u_action ret;
+	uint32_t retries;
+	retries = 0;
 
+get_io_u:
 	if (td_ioengine_flagged(td, FIO_NOIO))
 		goto out;
 
@@ -1062,6 +1065,16 @@ static int fill_io_u(struct thread_data *td, struct io_u *io_u)
 		if (ret == io_u_eof) {
 			dprint(FD_IO, "zbd_adjust_block() returned io_u_eof\n");
 			return 1;
+		else if (ret == io_u_retry) {
+			retries++;
+			if (retries > 1000) {
+			dprint(FD_ZBD, "Exiting random workload after picking %d write "
+				   "offsets with skip reset option set (offset 0x%llx)\n",
+				   retries,
+				   (unsigned long long) io_u->offset);
+			return 1;
+			}
+			goto get_io_u;
 		}
 	}
 
@@ -1949,6 +1962,9 @@ err_put:
 static void __io_u_log_error(struct thread_data *td, struct io_u *io_u)
 {
 	enum error_type_bit eb = td_error_type(io_u->ddir, io_u->error);
+	#ifdef CONFIG_LINUX_BLKZONED
+	struct zoned_block_device_info *zbd_info = io_u->file->zbd_info;
+	#endif
 
 	if (td_non_fatal_error(td, eb, io_u->error) && !td->o.error_dump)
 		return;
@@ -1960,6 +1976,26 @@ static void __io_u_log_error(struct thread_data *td, struct io_u *io_u)
 			"Device-specific error" : strerror(io_u->error),
 		io_ddir_name(io_u->ddir),
 		io_u->offset, io_u->xfer_buflen);
+	#ifdef CONFIG_LINUX_BLKZONED
+	if (zbd_info != NULL) {
+		uint64_t zone_ind;
+		struct fio_zone_info* zone_info;
+		zbd_info = io_u->file->zbd_info;
+		zone_ind = io_u->offset/zbd_info->zone_size;
+		if (zone_ind >= zbd_info->nr_zones) {
+			log_err("fio: io offset past zone table limits\n");
+			zone_ind = zbd_info->nr_zones - 1;
+		}
+		zone_info = &zbd_info->zone_info[zone_ind];
+		log_err("fio: zone info type, cond, start, wp = 0x%X, 0x%X, 0x%llX, 0x%llX\n",
+			zone_info->type,
+			zone_info->cond,
+			(unsigned long long) zone_info->start,
+			(unsigned long long) zone_info->wp);
+	} else if (td->o.zone_mode == ZONE_MODE_ZBD) {
+		log_err("fio: No zone information available even with zonemode=zbd\n");
+	}
+	#endif
 
 	zbd_log_err(td, io_u);
 

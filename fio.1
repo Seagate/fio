@@ -585,9 +585,9 @@ the first device, `\\\\.\\PhysicalDrive1' for the second etc.
 Note: Windows and FreeBSD prevent write access to areas
 of the disk containing in-use data (e.g. filesystems).
 .P
-For HTTP and S3 access, specify a valid URL path or S3 key, respectively. 
-A filename for path-style S3 includes a bucket name (`/bucket/k/e.y') 
-while a virtual-hosted-style S3 filename (`/k/e.y') does not because its 
+For HTTP and S3 access, specify a valid URL path or S3 key, respectively.
+A filename for path-style S3 includes a bucket name (`/bucket/k/e.y')
+while a virtual-hosted-style S3 filename (`/k/e.y') does not because its
 bucket name is specified in \fBhttp_host\fR.
 .P
 The filename `\-' is a reserved name, meaning *stdin* or *stdout*. Which
@@ -1179,7 +1179,7 @@ specified). This option is useful if there are several jobs which are
 intended to operate on a file in parallel disjoint segments, with even
 spacing between the starting points. Percentages can be used for this option.
 If a percentage is given, the generated offset will be aligned to the minimum
-\fBblocksize\fR or to the value of \fBoffset_align\fR if provided.In ZBD mode, value
+\fBblocksize\fR or to the value of \fBoffset_align\fR if provided. In ZBD mode, value
 can be set as number of zones using 'z'.
 .TP
 .BI number_ios \fR=\fPint
@@ -2564,9 +2564,9 @@ Touching all objects affects ceph caches and likely impacts test results.
 Enabled by default.
 .TP
 .BI (http)http_host \fR=\fPstr
-Hostname to connect to.  HTTP port 80 is used automatically when the value 
-of the \fBhttps\fP parameter is \fRoff\fP, and HTTPS port 443 if it is \Ron\fP.  
-A virtual-hosted-style S3 hostname starts with a bucket name, while a 
+Hostname to connect to.  HTTP port 80 is used automatically when the value
+of the \fBhttps\fP parameter is \fRoff\fP, and HTTPS port 443 if it is \Ron\fP.
+A virtual-hosted-style S3 hostname starts with a bucket name, while a
 path-style S3 hostname does not.  Default is \fBlocalhost\fR.
 .TP
 .BI (http)http_user \fR=\fPstr

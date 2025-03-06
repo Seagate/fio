@@ -307,7 +307,7 @@ bool calc_lat(struct io_stat *is, unsigned long long *min,
 	return true;
 }
 
-void show_mixed_group_stats(struct group_run_stats *rs, struct buf_output *out) 
+void show_mixed_group_stats(struct group_run_stats *rs, struct buf_output *out)
 {
 	char *io, *agg, *min, *max;
 	char *ioalt, *aggalt, *minalt, *maxalt;
@@ -440,6 +440,8 @@ static void stat_calc_lat_nu(struct thread_stat *ts, double *io_u_lat_u)
 	int i;
 
 	stat_calc_lat(ts, io_u_lat_u, ts->io_u_lat_u, FIO_IO_U_LAT_U_NR);
+	if (total <= 0)
+		return;
 
 	for (i = 0; i < FIO_IO_U_LAT_N_NR; i++)
 		ntotal += ts->io_u_lat_n[i];
@@ -1971,7 +1973,7 @@ struct json_object *show_thread_status(struct thread_stat *ts,
 	if (output_format & FIO_OUTPUT_JSON)
 		ret = show_thread_status_json(ts, rs, opt_list);
 	if (output_format & FIO_OUTPUT_NORMAL)
-		show_thread_status_normal(ts, rs,  out);
+		show_thread_status_normal(ts, rs, out);
 
 	return ret;
 }

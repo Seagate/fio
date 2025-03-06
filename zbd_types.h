@@ -17,6 +17,7 @@ enum zbd_zoned_model {
 	ZBD_NONE		= 0x1,	/* No zone support. Emulate zones. */
 	ZBD_HOST_AWARE		= 0x2,	/* Host-aware zoned block device */
 	ZBD_HOST_MANAGED	= 0x3,	/* Host-managed zoned block device */
+        ZBD_ZONE_DOMAINS        = 0x4,  /* Likely to contain host managed zones block device */
 };
 
 /*
@@ -26,6 +27,7 @@ enum zbd_zone_type {
 	ZBD_ZONE_TYPE_CNV	= 0x1,	/* Conventional */
 	ZBD_ZONE_TYPE_SWR	= 0x2,	/* Sequential write required */
 	ZBD_ZONE_TYPE_SWP	= 0x3,	/* Sequential write preferred */
+        ZBD_ZONE_TYPE_FLEX      = 0x4,  /* Sequential write required unless below write pointer */
 };
 
 /*
@@ -37,6 +39,7 @@ enum zbd_zone_cond {
         ZBD_ZONE_COND_IMP_OPEN  = 0x2,
         ZBD_ZONE_COND_EXP_OPEN  = 0x3,
         ZBD_ZONE_COND_CLOSED    = 0x4,
+        ZBD_ZONE_COND_INACTIVE  = 0x5,
         ZBD_ZONE_COND_READONLY  = 0xD,
         ZBD_ZONE_COND_FULL      = 0xE,
         ZBD_ZONE_COND_OFFLINE   = 0xF,

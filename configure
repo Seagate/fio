@@ -1331,7 +1331,7 @@ cat > $TMPC << EOF
 int main(int argc, char **argv)
 {
   unsigned int flags = SYNC_FILE_RANGE_WAIT_BEFORE | SYNC_FILE_RANGE_WRITE |
-			SYNC_FILE_RANGE_WAIT_AFTER;
+      SYNC_FILE_RANGE_WAIT_AFTER;
   return sync_file_range(0, 0, 0, flags);
 }
 EOF
@@ -2151,7 +2151,7 @@ EOF
 if compile_prog "" "" "s390_z196_facilities"; then
   $TMPE
   if [ $? -eq 0 ]; then
-  	s390_z196_facilities="yes"
+    s390_z196_facilities="yes"
   fi
 fi
 print_config "s390_z196_facilities" "$s390_z196_facilities"
@@ -2339,9 +2339,9 @@ if test "$dfs" != "no" ; then
 
 int main(int argc, char **argv)
 {
-  daos_handle_t	poh;
-  daos_handle_t	coh;
-  dfs_t		*dfs;
+  daos_handle_t poh;
+  daos_handle_t coh;
+  dfs_t   *dfs;
 
   (void) dfs_mount(poh, coh, O_RDWR, &dfs);
 
@@ -2920,8 +2920,8 @@ cat > $TMPC << EOF
 
 int main(int argc, char **argv)
 {
-	struct statx st;
-	return statx(-1, *argv, 0, 0, &st);
+  struct statx st;
+  return statx(-1, *argv, 0, 0, &st);
 }
 EOF
 if compile_prog "" "" "statx"; then
@@ -2939,15 +2939,15 @@ cat > $TMPC << EOF
 #include <sys/syscall.h>
 
 static int _statx(int dfd, const char *pathname, int flags, unsigned int mask,
-		  struct statx *buffer)
+      struct statx *buffer)
 {
-	return syscall(__NR_statx, dfd, pathname, flags, mask, buffer);
+  return syscall(__NR_statx, dfd, pathname, flags, mask, buffer);
 }
 
 int main(int argc, char **argv)
 {
-	struct statx st;
-	return _statx(-1, *argv, 0, 0, &st);
+  struct statx st;
+  return _statx(-1, *argv, 0, 0, &st);
 }
 EOF
 if compile_prog "" "" "statx_syscall"; then
@@ -2987,7 +2987,7 @@ cat > $TMPC << EOF
 
 int main(int argc, char **argv)
 {
-	return timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK);
+  return timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK);
 }
 EOF
   if compile_prog "" "" "timerfd_create"; then

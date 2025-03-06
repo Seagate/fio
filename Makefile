@@ -58,7 +58,7 @@ SOURCE :=	$(sort $(patsubst $(SRCDIR)/%,%,$(wildcard $(SRCDIR)/crc/*.c)) \
 		engines/mmap.c engines/sync.c engines/null.c engines/net.c \
 		engines/ftruncate.c engines/fileoperations.c \
 		engines/exec.c \
-		server.c client.c iolog.c backend.c libfio.c flow.c cconv.c \
+		server.c sg_zone_domains.c client.c iolog.c backend.c libfio.c flow.c cconv.c \
 		gettime-thread.c helpers.c json.c idletime.c td_error.c \
 		profiles/tiobench.c profiles/act.c io_u_queue.c filelock.c \
 		workqueue.c rate-submit.c optgroup.c helper_thread.c \
@@ -89,6 +89,12 @@ ifdef CONFIG_LIBNFS
   CFLAGS += $(LIBNFS_CFLAGS)
   LIBS += $(LIBNFS_LIBS)
   SOURCE += engines/nfs.c
+endif
+
+ifdef CONFIG_LIBNBD
+  CFLAGS += $(LIBNBD_CFLAGS)
+  LIBS += $(LIBNBD_LIBS)
+  SOURCE += engines/nbd.c
 endif
 
 ifdef CONFIG_64BIT

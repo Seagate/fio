@@ -112,6 +112,10 @@ struct fio_file {
 	/* zonemode=zbd working area */
 	uint32_t min_zone;	/* inclusive */
 	uint32_t max_zone;	/* exclusive */
+	uint32_t min_online_zone;	/* inclusive */
+	uint32_t max_online_zone;	/* exclusive */
+	uint32_t min_offline_zone;	/* inclusive */
+	uint32_t max_offline_zone;	/* exclusive */
 
 	/*
 	 * Track last end and last start of IO for a given data direction

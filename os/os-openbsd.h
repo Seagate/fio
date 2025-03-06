@@ -34,12 +34,15 @@
 #define fio_swap16(x)	swap16(x)
 #define fio_swap32(x)	swap32(x)
 #define fio_swap64(x)	swap64(x)
+<<<<<<< HEAD
+=======
 
 #ifdef CONFIG_PTHREAD_GETAFFINITY
 #define FIO_HAVE_GET_THREAD_AFFINITY
 #define fio_get_thread_affinity(mask)	\
 	pthread_getaffinity_np(pthread_self(), sizeof(mask), &(mask))
 #endif
+>>>>>>> merge_branch
 
 static inline int blockdev_size(struct fio_file *f, unsigned long long *bytes)
 {

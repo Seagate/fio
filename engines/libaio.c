@@ -35,6 +35,11 @@ struct libaio_data {
 	struct io_event *aio_events;
 	struct iocb **iocbs;
 	struct io_u **io_us;
+	/*
+	 * For toggling libaio priority_percent option
+	 */
+	unsigned long prio_seed;
+	struct frand_state prio_state;
 
 	struct io_u **io_u_index;
 	struct iovec *iovecs;		/* for vectored requests */
@@ -100,7 +105,7 @@ static struct fio_option options[] = {
 };
 
 static inline void ring_inc(struct libaio_data *ld, unsigned int *val,
-			    unsigned int add)
+				unsigned int add)
 {
 	if (ld->is_pow2)
 		*val = (*val + add) & (ld->entries - 1);
@@ -200,7 +205,7 @@ struct aio_ring {
 #define AIO_RING_MAGIC	0xa10a10a1
 
 static int user_io_getevents(io_context_t aio_ctx, unsigned int max,
-			     struct io_event *events)
+				 struct io_event *events)
 {
 	long i = 0;
 	unsigned head;
@@ -240,8 +245,8 @@ static int fio_libaio_getevents(struct thread_data *td, unsigned int min,
 
 	do {
 		if (o->userspace_reap == 1
-		    && actual_min == 0
-		    && ((struct aio_ring *)(ld->aio_ctx))->magic
+			&& actual_min == 0
+			&& ((struct aio_ring *)(ld->aio_ctx))->magic
 				== AIO_RING_MAGIC) {
 			r = user_io_getevents(ld->aio_ctx, max - events,
 				ld->aio_events + events);
@@ -309,7 +314,7 @@ static enum fio_q_status fio_libaio_queue(struct thread_data *td,
 }
 
 static void fio_libaio_queued(struct thread_data *td, struct io_u **io_us,
-			      unsigned int nr)
+				  unsigned int nr)
 {
 	struct timespec now;
 	unsigned int i;
@@ -350,6 +355,8 @@ static int fio_libaio_commit(struct thread_data *td)
 		nr = min((unsigned int) nr, ld->entries - ld->tail);
 		io_us = ld->io_us + ld->tail;
 		iocbs = ld->iocbs + ld->tail;
+
+		dprint(FD_IO, "Submitted %ld IO request blocks\n", nr);
 
 		ret = io_submit(ld->aio_ctx, nr, iocbs);
 		if (ret > 0) {

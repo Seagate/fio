@@ -229,4 +229,14 @@ int fio_cpu_isset(os_cpu_mask_t *mask, int cpu);
 int fio_cpu_count(os_cpu_mask_t *mask);
 int fio_cpuset_exit(os_cpu_mask_t *mask);
 
+int first_set_cpu(os_cpu_mask_t *cpumask);
+int fio_setaffinity(int pid, os_cpu_mask_t cpumask);
+int fio_cpuset_init(os_cpu_mask_t *mask);
+int fio_getaffinity(int pid, os_cpu_mask_t *mask);
+void fio_cpu_clear(os_cpu_mask_t *mask, int cpu);
+void fio_cpu_set(os_cpu_mask_t *mask, int cpu);
+int fio_cpu_isset(os_cpu_mask_t *mask, int cpu);
+int fio_cpu_count(os_cpu_mask_t *mask);
+int fio_cpuset_exit(os_cpu_mask_t *mask);
+
 #endif /* FIO_OS_WINDOWS_H */

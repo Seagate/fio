@@ -14,10 +14,25 @@
 
 struct fio_file;
 
+/*
+ * Maximum number of zones to report in one operation.
+ */
+#define ZBD_REPORT_MAX_ZONES	8192U
+
+/*
+ * Zoned block device models.
+ */
+enum blk_zoned_model {
+	ZBD_DM_NONE,	/* Regular block device */
+	ZBD_DM_HOST_AWARE,	/* Host-aware zoned block device */
+	ZBD_DM_HOST_MANAGED,	/* Host-managed zoned block device */
+};
+
 enum io_u_action {
 	io_u_accept	= 0,
 	io_u_eof	= 1,
 	io_u_completed  = 2,
+	io_u_retry	= 3,
 };
 
 /**
@@ -38,7 +53,7 @@ struct fio_zone_info {
 	uint64_t		start;
 	uint64_t		wp;
 	uint64_t		capacity;
-	enum zbd_zone_type	type:2;
+	enum zbd_zone_type	type:3;
 	enum zbd_zone_cond	cond:4;
 	unsigned int		has_wp:1;
 	unsigned int		write:1;
@@ -86,10 +101,15 @@ struct zoned_block_device_info {
 	uint32_t		write_max_zone;
 	uint32_t		zone_size_log2;
 	uint32_t		nr_zones;
+	uint32_t		nr_online_zones;
+	uint32_t		nr_offline_zones;
 	uint32_t		refcount;
 	uint32_t		num_write_zones;
 	uint32_t		write_cnt;
 	uint32_t		write_zones[ZBD_MAX_WRITE_ZONES];
+	int		use_sg;
+	uint32_t		block_size;
+	struct fio_zone_info**	online_zone_info;
 	struct fio_zone_info	zone_info[0];
 };
 
