@@ -208,6 +208,7 @@ static int zbd_report_zones(struct thread_data *td, struct fio_file *f,
 				unsigned int nr_zones, int *use_sg_rz, uint32_t *block_size)
 {
 	int ret;
+
 	if (use_sg_rz == NULL || block_size == NULL) {
 		if (f->zbd_info) {
 			use_sg_rz = &f->zbd_info->use_sg;
@@ -232,6 +233,10 @@ static int zbd_report_zones(struct thread_data *td, struct fio_file *f,
 		td_verror(td, errno, "report zones failed");
 		log_err("%s: report zones from sector %"PRIu64" failed (nr_zones=%d; errno=%d).\n",
 			f->file_name, offset >> 9, nr_zones, errno);
+		if (errno == 22) {
+		    log_err("invalid arguments from %s: nr_zones = %d, use_sg_rz = %d, block_size = %d\n",
+		        f->file_name, nr_zones, *use_sg_rz, *block_size);
+		}
 	} else if (ret == 0) {
 		td_verror(td, errno, "Empty zone report");
 		log_err("%s: report zones from sector %"PRIu64" is empty.\n",
@@ -760,7 +765,7 @@ static bool zbd_verify_sizes(void)
 static bool zbd_verify_bs(void)
 {
 	struct fio_file *f;
-	int j;
+	int j, k;
 
 	for_each_td(td) {
 		if (td_trim(td) &&
@@ -887,7 +892,7 @@ static int parse_zone_info(struct thread_data *td, struct fio_file *f, bool allo
 	int nr_zones, nrz, online_zone_ind, offline_zone_ind, seq_info;
 	struct zbd_zone *zones, *z;
 	struct fio_zone_info *p;
-	uint64_t zone_size, offset, next_online_offset;
+	uint64_t zone_size, offset, next_online_offset, capacity;
 	bool same_zone_cap = true;
 	struct zoned_block_device_info *zbd_info = NULL;
 	int i, j, ret = -ENOMEM;
@@ -1323,6 +1328,7 @@ int zbd_setup_files(struct thread_data *td)
 {
 	struct fio_file *f;
 	int i;
+	uint64_t vdb;
 
 	if (!zbd_using_direct_io()) {
 		log_err("Using direct I/O is mandatory for writing to ZBD drives\n\n");
@@ -1344,7 +1350,6 @@ int zbd_setup_files(struct thread_data *td)
 		struct zoned_block_device_info *zbd = f->zbd_info;
 		struct fio_zone_info *z;
 		int zi, on_zi, off_zi;;
-		uint64_t vdb;
 
 		assert(zbd);
 
@@ -1545,14 +1550,9 @@ static bool any_io_in_flight(void)
  * a multiple of the fio block size. The caller must neither hold z->mutex
  * nor f->zbd_info->mutex. Returns with z->mutex held upon success.
  */
-<<<<<<< HEAD
+// This function seems like it could be simplified significantly
 static struct fio_zone_info *zbd_convert_to_write_zone(struct thread_data *td,
 						       struct io_u *io_u)
-=======
-// This function seems like it could be simplified significantly
-static struct fio_zone_info *zbd_convert_to_open_zone(struct thread_data *td,
-							  struct io_u *io_u)
->>>>>>> master
 {
 	const uint64_t min_bs = td->o.min_bs[io_u->ddir];
 	struct fio_file *f = io_u->file;
@@ -1604,23 +1604,13 @@ static struct fio_zone_info *zbd_convert_to_open_zone(struct thread_data *td,
 		// a wp zone, which wouldn't work on some configurations like 100% SMR
 		if (z->has_wp) {
 			if (z->cond != ZBD_ZONE_COND_OFFLINE &&
-<<<<<<< HEAD
 			    zbdi->max_write_zones == 0 &&
 			    td->o.job_max_open_zones == 0)
 				goto examine_zone;
 			if (zbdi->num_write_zones == 0) {
-				dprint(FD_ZBD, "%s(%s): no zone is write target\n",
+				dprint(FD_ZBD, "%s(%s): no zone is a write target\n",
 				       __func__, f->file_name);
 				goto choose_other_zone;
-=======
-				zbdi->max_open_zones == 0 &&
-				td->o.job_max_open_zones == 0)
-				goto examine_zone;
-			if (zbdi->num_open_zones == 0) {
-				dprint(FD_ZBD, "%s(%s): no zones are open\n",
-					   __func__, f->file_name);
-				goto open_other_zone;
->>>>>>> master
 			}
 		}
 		// Not sure why this function even continues. Surely it's illegal
@@ -1631,17 +1621,10 @@ static struct fio_zone_info *zbd_convert_to_open_zone(struct thread_data *td,
 		 * threads. Start with quasi-random candidate zone. Ignore
 		 * zones which don't belong to thread's offset/size area.
 		 */
-<<<<<<< HEAD
 		write_zone_idx = pick_random_zone_idx(f, io_u);
 		assert(!write_zone_idx ||
 		       write_zone_idx < zbdi->num_write_zones);
 		tmp_idx = write_zone_idx;
-=======
-		open_zone_idx = pick_random_zone_idx(f, io_u);
-		assert(!open_zone_idx ||
-			   open_zone_idx < zbdi->num_open_zones);
-		tmp_idx = open_zone_idx;
->>>>>>> master
 
 		for (i = 0; i < zbdi->num_write_zones; i++) {
 			uint32_t tmpz;
@@ -1706,13 +1689,8 @@ choose_other_zone:
 	 */
 	if (wait_zone_write) {
 		dprint(FD_ZBD,
-<<<<<<< HEAD
 		       "%s(%s): quiesce to remove a zone from write target zones array\n",
 		       __func__, f->file_name);
-=======
-			   "%s(%s): quiesce to allow open zones to close\n",
-			   __func__, f->file_name);
->>>>>>> master
 		io_u_quiesce(td);
 	}
 
@@ -1766,14 +1744,9 @@ retry:
 	in_flight = any_io_in_flight();
 	if (in_flight || should_retry) {
 		dprint(FD_ZBD,
-<<<<<<< HEAD
 		       "%s(%s): wait zone write and retry write target zone selection\n",
 		       __func__, f->file_name);
 		should_retry = in_flight;
-=======
-			   "%s(%s): wait zone close and retry open zones\n",
-			   __func__, f->file_name);
->>>>>>> master
 		pthread_mutex_unlock(&zbdi->mutex);
 		zone_unlock(z);
 		io_u_quiesce(td);
@@ -1785,13 +1758,8 @@ retry:
 
 	zone_unlock(z);
 
-<<<<<<< HEAD
 	dprint(FD_ZBD, "%s(%s): did not choose another write zone\n",
 	       __func__, f->file_name);
-=======
-	dprint(FD_ZBD, "%s(%s): did not open another zone\n",
-		   __func__, f->file_name);
->>>>>>> master
 
 	return NULL;
 
@@ -1806,45 +1774,6 @@ out:
 	return z;
 }
 
-<<<<<<< HEAD
-=======
-/* The caller must hold z->mutex. */
-static struct fio_zone_info *zbd_replay_write_order(struct thread_data *td,
-							struct io_u *io_u,
-							struct fio_zone_info *z)
-{
-	const struct fio_file *f = io_u->file;
-	const uint64_t min_bs = td->o.min_bs[DDIR_WRITE];
-
-	if (!zbd_open_zone(td, f, z)) {
-		zone_unlock(z);
-		z = zbd_convert_to_open_zone(td, io_u);
-		assert(z);
-	}
-
-	if (z->verify_block * min_bs >= z->capacity) {
-		log_err("%s: %d * %"PRIu64" >= %"PRIu64"\n",
-			f->file_name, z->verify_block, min_bs, z->capacity);
-		/*
-		 * If the assertion below fails during a test run, adding
-		 * "--experimental_verify=1" to the command line may help.
-		 */
-		assert(false);
-	}
-
-	io_u->offset = z->start + z->verify_block * min_bs;
-	if (io_u->offset + io_u->buflen >= zbd_zone_capacity_end(z)) {
-		log_err("%s: %llu + %llu >= %"PRIu64"\n",
-			f->file_name, io_u->offset, io_u->buflen,
-			zbd_zone_capacity_end(z));
-		assert(false);
-	}
-	z->verify_block += io_u->buflen / min_bs;
-
-	return z;
-}
-
->>>>>>> master
 /*
  * Find another zone which has @min_bytes of readable data. Search in zones
  * @zb + 1 .. @zl. For random workload, also search in zones @zb - 1 .. @zf.
@@ -2112,13 +2041,8 @@ enum fio_ddir zbd_adjust_ddir(struct thread_data *td, struct io_u *io_u,
 	if (ddir != DDIR_READ || !td_rw(td))
 		return ddir;
 
-<<<<<<< HEAD
 	if (io_u->file->last_start[DDIR_WRITE] != -1ULL ||
 	    td->o.read_beyond_wp || td->o.rwmix[DDIR_WRITE] == 0)
-=======
-	if (io_u->file->zbd_info->sectors_with_data ||
-		td->o.read_beyond_wp)
->>>>>>> master
 		return DDIR_READ;
 
 	return DDIR_WRITE;
@@ -2361,7 +2285,6 @@ enum io_u_action zbd_adjust_block(struct thread_data *td, struct io_u *io_u)
 			goto eof;
 		}
 
-<<<<<<< HEAD
 retry:
 		if (zbd_zone_remainder(zb) > 0 &&
 		    zbd_zone_remainder(zb) < min_bs) {
@@ -2377,17 +2300,6 @@ retry:
 				if (!td_random(td))
 					goto eof;
 			}
-=======
-		/* Check whether the zone reset threshold has been exceeded */
-		if (td->o.zrf.u.f) {
-			if (f->zbd_info->sectors_with_data >=
-				f->io_size * td->o.zrt.u.f &&
-				zbd_dec_and_reset_write_cnt(td, f))
-				zb->reset_zone = 1;
-		}
-
-		if (!zbd_open_zone(td, f, zb)) {
->>>>>>> master
 			zone_unlock(zb);
 
 			/* Find the next write pointer zone */
@@ -2404,18 +2316,12 @@ retry:
 			zone_unlock(zb);
 			zb = zbd_convert_to_write_zone(td, io_u);
 			if (!zb) {
-<<<<<<< HEAD
 				dprint(FD_IO, "%s: can't convert to write target zone",
 				       f->file_name);
-=======
-				dprint(FD_IO, "%s: can't convert to open zone",
-					   f->file_name);
->>>>>>> master
 				goto eof;
 			}
 		}
 
-<<<<<<< HEAD
 		if (zbd_zone_remainder(zb) > 0 &&
 		    zbd_zone_remainder(zb) < min_bs)
 			goto retry;
@@ -2428,8 +2334,6 @@ retry:
 				zb->reset_zone = 1;
 		}
 
-=======
->>>>>>> master
 		/* Reset the zone pointer if necessary */
 		if (zb->reset_zone || zbd_zone_full(f, zb, min_bs)) {
 			if (td->o.verify != VERIFY_NONE) {

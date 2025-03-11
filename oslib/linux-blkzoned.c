@@ -231,7 +231,7 @@ static uint64_t zone_capacity(struct blk_zone_report *hdr,
 	return blkz->len << 9;
 }
 
-int blkzoned_report_zones(struct thread_data *td, struct fio_file *f,
+int _blkzoned_report_zones(struct thread_data *td, struct fio_file *f,
 			  uint64_t offset, struct zbd_zone *zones,
 			  unsigned int nr_zones, int *use_sg_rz, uint32_t *block_size)
 {
@@ -258,6 +258,8 @@ int blkzoned_report_zones(struct thread_data *td, struct fio_file *f,
 		hdr->nr_zones = nr_zones;
 		hdr->sector = offset >> lba_power;
 		ret = ioctl(fd, BLKREPORTZONE, hdr);
+		dprint(FD_ZBD, "%s: BLKREPORTZONE ioctl failed, ret=%d, err=%d.\n",
+			f->file_name, ret, -errno);
 	}
 	// Get zones using sg_report_zones
 	// TODO: Check this failed for the right reason
@@ -287,10 +289,12 @@ int blkzoned_report_zones(struct thread_data *td, struct fio_file *f,
 			goto out;
 		}
 		ret = sg_read_zone_info(fd, offset, use_sg_rz, block_size, hdr, bufsz);
+		if (ret) {
+			dprint(FD_ZBD, "%s: sg_read_zone_info failed, ret=%d, err=%d.\n",
+				f->file_name, ret, -errno);
+		}
 	}
 	if (ret) {
-		log_err("%s: BLKREPORTZONE ioctl failed, ret=%d, err=%d.\n",
-			f->file_name, ret, -errno);
 		ret = -errno;
 		goto out;
 	}
@@ -363,6 +367,38 @@ out:
 	close(fd);
 	return ret;
 }
+
+
+unsigned int practical_max_report_zones = ZBD_REPORT_MAX_ZONES;
+
+
+int blkzoned_report_zones(struct thread_data *td, struct fio_file *f,
+			  uint64_t offset, struct zbd_zone *zones,
+			  unsigned int nr_zones, int *use_sg_rz, uint32_t *block_size) {
+	int ret, i;
+	if (nr_zones > practical_max_report_zones) {
+		nr_zones = practical_max_report_zones;
+	}
+	// Try up to 4 times on a report zones on EINVAL, reducing nr_zones to a minimum of 2048
+	for (i = 0; i < 4; i++) {
+		ret = _blkzoned_report_zones(td, f, offset, zones, nr_zones, use_sg_rz, block_size);
+		if (ret == -EINVAL && nr_zones > 2048) {
+			// Might want to only set this based on repeated failures
+			practical_max_report_zones = nr_zones / 2;
+			if (practical_max_report_zones < 2048) {
+				practical_max_report_zones = 2048;
+			}
+			dprint(
+				FD_ZBD, "%s: EINVAL received from report zones, retrying with nr_zones changed from %u to %u\n",
+				f->file_name, nr_zones, practical_max_report_zones);
+			nr_zones = practical_max_report_zones;
+		} else {
+			break;
+		}
+	}
+	return ret;
+}
+
 
 int blkzoned_reset_wp(struct thread_data *td, struct fio_file *f,
 		      uint64_t offset, uint64_t length)

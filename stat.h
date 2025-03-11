@@ -281,7 +281,6 @@ struct thread_stat {
 		uint64_t ss_bw_data_offset;
 		uint64_t pad5;
 	};
-<<<<<<< HEAD
 
 	union {
 		struct clat_prio_stat *clat_prio[DDIR_RWDIR_CNT];
@@ -294,8 +293,6 @@ struct thread_stat {
 	};
 	uint32_t nr_clat_prio[DDIR_RWDIR_CNT];
 
-=======
->>>>>>> master
 	uint64_t cachehit;
 	uint64_t cachemiss;
 } __attribute__((packed));

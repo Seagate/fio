@@ -1065,6 +1065,7 @@ get_io_u:
 		if (ret == io_u_eof) {
 			dprint(FD_IO, "zbd_adjust_block() returned io_u_eof\n");
 			return 1;
+		}
 		else if (ret == io_u_retry) {
 			retries++;
 			if (retries > 1000) {
